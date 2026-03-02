@@ -1,0 +1,21 @@
+/target/
+/artifacts/
+/.sendbuild-cache/
+
+# Rust/Cargo
+**/*.rs.bk
+
+# Environment files
+.env
+.env.*
+
+# Logs
+*.log
+
+# IDE/editor
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

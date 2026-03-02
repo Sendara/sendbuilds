@@ -1,0 +1,220 @@
+# sendbuilds
+
+Build automation CLI with step events, caching, auto-detection, metrics, sandbox controls, artifact signing, and multi-target outputs.
+
+## Run
+
+```bash
+sendbuilds build --config sendbuild.toml
+```
+
+## Local development and testing
+
+Build and run the CLI locally:
+
+```bash
+cargo build --release
+./target/release/sendbuilds --help
+./target/release/sendbuilds build --config sendbuild.toml
+```
+
+On Windows PowerShell:
+
+```powershell
+cargo build --release
+.\target\release\sendbuilds.exe --help
+.\target\release\sendbuilds.exe build --config sendbuild.toml
+```
+
+Run without a release build:
+
+```bash
+cargo run -- build --config sendbuild.toml
+```
+
+Localhost testing flow for a web app:
+
+1. Build with `sendbuilds` (`build` command).
+2. Enter the produced artifact folder under `deploy.artifact_dir`.
+3. Start your framework runtime from that artifact (for example `pnpm run start`, `python manage.py runserver`, etc.).
+
+If `[source]` is omitted in `sendbuild.toml`, `sendbuilds` uses the current workspace as source input.
+
+## CLI commands
+
+```bash
+sendbuilds build [--config sendbuild.toml]
+sendbuilds init [--template <framework>] [--yes]
+sendbuilds cache save|restore|clear|status [--config sendbuild.toml]
+sendbuilds clean [--all] [--cache-only] [--config sendbuild.toml]
+sendbuilds info [--env] [--dependencies] [--config sendbuild.toml]
+```
+
+## Minimal config
+
+```toml
+[project]
+name = "my-app"
+
+[deploy]
+artifact_dir = "./artifacts"
+```
+
+`source`, `language`, `install_cmd`, `build_cmd`, and `output_dir` are optional. If `[source]` is omitted, `sendbuilds` uses the current folder contents as build input.
+
+## Full config (all features)
+
+```toml
+[project]
+name = "my-app"
+language = "nodejs" # optional override
+
+[source] # optional
+repo = "https://github.com/you/my-app.git" # optional
+branch = "main" # optional
+
+[build]
+install_cmd = "pnpm install --frozen-lockfile --prefer-offline" # optional override
+build_cmd = "pnpm run build"                                     # optional override
+parallel_build_cmds = ["pnpm run build:client", "pnpm run build:server"] # optional
+output_dir = ".next"                                             # optional override
+
+[deploy]
+artifact_dir = "./artifacts"
+targets = ["directory", "tarball", "serverless_zip", "container_image"] # optional
+container_image = "my-app:latest"                                       # optional
+
+[cache]
+enabled = true
+dir = "./artifacts/.sendbuild-cache"
+
+[scan]
+enabled = true
+command = "npm audit --json --omit=dev --audit-level=high"
+
+[sandbox]
+enabled = true
+
+[signing]
+enabled = true
+key_env = "SENDBUILD_SIGNING_KEY"
+
+[compatibility]
+target_os = "linux"
+target_arch = "x86_64"
+target_node_major = 20
+
+env_from_host = ["GITHUB_TOKEN", "NPM_TOKEN"]
+
+[env]
+NODE_ENV = "production"
+API_BASE_URL = "https://api.example.com"
+```
+
+## Step events
+
+Machine-readable step events are emitted to stdout:
+
+```text
+EVENT {"type":"STEP_STARTED","channel":"build-step","step":"install","status":"running","timestamp":"..."}
+EVENT {"type":"STEP_COMPLETED","channel":"build-step","step":"install","status":"completed","timestamp":"...","duration_ms":1234,"cpu_percent":5.2,"memory_mb":24,"disk_mb":300}
+EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"failed","timestamp":"...","duration_ms":4321,"error":"..."}
+```
+
+## Added capabilities
+
+1. Build metrics
+- Per-step duration, status, and cache hit/miss accounting.
+- Writes `build-metrics.json` into deployed artifact root.
+
+2. Resource usage tracking
+- Captures per-step CPU, memory delta, and disk delta.
+- Included in events and step summary output.
+
+3. Sandboxing controls
+- Optional sandbox mode for command execution (`[sandbox].enabled`).
+- Applies basic command blocking and restricted environment baseline.
+
+4. Signed artifacts
+- Optional HMAC-SHA256 signing of artifact manifest.
+- Outputs:
+- `artifact-manifest.json`
+- `artifact-manifest.sig`
+
+5. Environment variable injection
+- `[env]` for explicit key/value injection.
+- `env_from_host` list to forward host env vars.
+
+6. Multiple output targets
+- `directory` (copied output)
+- `static_site` (alias of directory for static hosting)
+- `tarball` (`artifact.tar.gz`)
+- `serverless_zip` / `serverless_function` (`serverless.zip`)
+- `container_image` (`docker build`, if docker available)
+
+7. Compatibility checks
+- Optional warnings for target OS/arch/node major mismatch.
+- Reads package `engines.node` when available.
+
+8. Multi-language support
+- Node.js
+- Python
+- Ruby
+- Go
+- Java
+- PHP
+- Rust
+- Static sites
+- Shell scripts
+- C/C++
+- Gleam
+- Elixir
+- Deno
+- .NET
+
+9. Multi-framework support (auto-detection/inference)
+- Next.js
+- Rails
+- Django
+- Flask
+- Spring (Maven/Gradle-based projects)
+- Laravel
+- Generic package manager / build tool detection for each language
+
+## Security scan failure details
+
+When `security-scan` fails, the error now includes vulnerable package names and actionable suggestions.
+
+Example:
+
+```text
+EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","status":"failed","timestamp":"...","duration_ms":2065,"error":"security scan failed. command=`npm audit --json --omit=dev --audit-level=high` exit=Some(1). vulnerable packages: minimist(high,fix:available), braces(high,fix:upgrade). suggestions: 1) npm audit fix 2) update vulnerable packages/lockfile 3) if blocked, pin safe versions and rebuild cache"}
+```
+
+## Notes
+
+- Builds run in temporary work directories under system temp.
+- Deploy artifacts are emitted under timestamped directories in `deploy.artifact_dir`.
+- For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.
+
+## Contributing
+
+1. Fork and create a branch from `main`.
+2. Make focused changes with clear commit messages.
+3. Run local checks before opening a PR:
+
+```bash
+cargo fmt --all -- --check
+cargo check
+cargo test
+```
+
+4. If you changes, update `README.md` and `sendbuild.toml` examples.
+5. Open a PR with:
+- what changed
+- why it changed
+- how you tested it
+
+## CI
+
+GitHub Actions CI runs on push and pull requests. It validates formatting, compilation, tests, and release build output for Linux and Windows.

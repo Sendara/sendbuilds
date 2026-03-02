@@ -1,0 +1,45 @@
+[project]
+name     = "test"
+# language = "nodejs" # optional override (auto-detected if omitted)
+
+# [source] is optional. if omitted, build uses current folder files.
+# [source]
+# repo = "https://github.com/you/my-app.git"
+# branch = "main"
+
+[build]
+# install_cmd = "pnpm install --frozen-lockfile --prefer-offline"
+# build_cmd   = "pnpm run build"
+# optional: run independent build tasks in parallel
+# parallel_build_cmds = ["pnpm run build:client", "pnpm run build:server"]
+# output_dir  = ".next"
+
+[deploy]
+artifact_dir = "./artifacts"
+# targets = ["static_site", "tarball", "serverless_function", "container_image"]
+# container_image = "sendara-landing:latest"
+
+[cache]
+enabled = true
+dir = "./artifacts/.sendbuild-cache"
+
+[scan]
+enabled = false
+command = "npm audit --json --omit=dev --audit-level=high"
+
+[sandbox]
+enabled = true
+
+[signing]
+enabled = false
+key_env = "SENDBUILD_SIGNING_KEY"
+
+env_from_host = ["GITHUB_TOKEN"]
+
+[compatibility]
+# target_os = "linux"
+# target_arch = "x86_64"
+# target_node_major = 20
+
+[env]
+NODE_ENV = "production"
