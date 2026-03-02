@@ -2,6 +2,10 @@
 
 Build automation CLI with step events, caching, auto-detection, metrics, sandbox controls, artifact signing, and multi-target outputs.
 
+## Supported Language/Frameworks
+- Next.js, Rails, Django, Flask, Spring (Maven/Gradle), Laravel, plus generic toolchain detection by language.
+- Node.js, Python, Ruby, Go, Java, PHP, Rust, Static Sites, Shell Scripts, C/C++, Gleam, Elixir, Deno, and .NET.
+
 ## Run
 
 ```bash
@@ -123,63 +127,15 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 
 ## Added capabilities
 
-1. Build metrics
-- Per-step duration, status, and cache hit/miss accounting.
-- Writes `build-metrics.json` into deployed artifact root.
-
-2. Resource usage tracking
-- Captures per-step CPU, memory delta, and disk delta.
-- Included in events and step summary output.
-
-3. Sandboxing controls
-- Optional sandbox mode for command execution (`[sandbox].enabled`).
-- Applies basic command blocking and restricted environment baseline.
-
-4. Signed artifacts
-- Optional HMAC-SHA256 signing of artifact manifest.
-- Outputs:
-- `artifact-manifest.json`
-- `artifact-manifest.sig`
-
-5. Environment variable injection
-- `[env]` for explicit key/value injection.
-- `env_from_host` list to forward host env vars.
-
-6. Multiple output targets
-- `directory` (copied output)
-- `static_site` (alias of directory for static hosting)
-- `tarball` (`artifact.tar.gz`)
-- `serverless_zip` / `serverless_function` (`serverless.zip`)
-- `container_image` (`docker build`, if docker available)
-
-7. Compatibility checks
-- Optional warnings for target OS/arch/node major mismatch.
-- Reads package `engines.node` when available.
-
-8. Multi-language support
-- Node.js
-- Python
-- Ruby
-- Go
-- Java
-- PHP
-- Rust
-- Static sites
-- Shell scripts
-- C/C++
-- Gleam
-- Elixir
-- Deno
-- .NET
-
-9. Multi-framework support (auto-detection/inference)
-- Next.js
-- Rails
-- Django
-- Flask
-- Spring (Maven/Gradle-based projects)
-- Laravel
-- Generic package manager / build tool detection for each language
+1. Build metrics: per-step duration, status, cache hit/miss accounting, plus `build-metrics.json` in the artifact root.
+2. Resource usage tracking: per-step CPU, memory delta, and disk delta in events and step summaries.
+3. Sandboxing controls: optional sandbox mode (`[sandbox].enabled`) with basic command blocking and restricted env baseline.
+4. Signed artifacts: optional HMAC-SHA256 manifest signing with `artifact-manifest.json` and `artifact-manifest.sig`.
+5. Environment variable injection: explicit `[env]` values and `env_from_host` passthrough.
+6. Multiple output targets: `directory`, `static_site`, `tarball`, `serverless_zip` / `serverless_function`, and `container_image`.
+7. Compatibility checks: optional warnings for target OS/arch/node-major mismatches, including `engines.node` checks when available.
+8. Multi-language support: Node.js, Python, Ruby, Go, Java, PHP, Rust, Static Sites, Shell Scripts, C/C++, Gleam, Elixir, Deno, and .NET.
+9. Multi-framework support: Next.js, Rails, Django, Flask, Spring (Maven/Gradle), Laravel, plus generic toolchain detection by language.
 
 ## Security scan failure details
 
@@ -199,7 +155,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 
 ## Contributing
 
-1. Fork and create a branch from `main`.
+1. Fork and create a branch from `master`.
 2. Make focused changes with clear commit messages.
 3. Run local checks before opening a PR:
 
