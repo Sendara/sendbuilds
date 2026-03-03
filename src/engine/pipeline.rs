@@ -572,16 +572,33 @@ impl BuildEngine {
         step: &mut Step,
     ) -> Result<shell::ShellRunOutput> {
         let candidates = self.install_fallback_candidates(cmd);
-        let mut last = None;
+        let mut failures = Vec::new();
         for (i, c) in candidates.iter().enumerate() {
             step.push_log(format!("install attempt {} {}", i + 1, c));
             let run = shell::run_allow_failure(c, wd, env, sandbox)?;
+            for line in &run.logs {
+                step.push_log(line.clone());
+                log::pipe(line);
+            }
             if run.success {
                 return Ok(run);
             }
-            last = Some(format!("attempt {} failed exit={:?}", i + 1, run.exit_code));
+            let hint = explain_exit_code(run.exit_code)
+                .map(|v| format!(" hint={v}"))
+                .unwrap_or_default();
+            failures.push(format!(
+                "attempt {} cmd=`{}` exit={:?}{}",
+                i + 1,
+                c,
+                run.exit_code,
+                hint
+            ));
         }
-        bail!("{}", last.unwrap_or_else(|| "install failed".to_string()))
+        bail!(
+            "install failed after {} attempt(s): {}",
+            candidates.len(),
+            failures.join(" | ")
+        )
     }
 
     fn install_fallback_candidates(&self, initial: &str) -> Vec<String> {
@@ -893,6 +910,7 @@ impl BuildEngine {
             .unwrap_or_else(|| vec!["directory".to_string()]);
         let published = artifacts::publish(
             &output_src,
+            &ctx.work_dir,
             &ctx.artifact_dir,
             &self.config.project.name,
             &targets,
@@ -1103,4 +1121,24 @@ fn has_glob_ext(root: &Path, ext: &str) -> bool {
         }
     }
     false
+}
+
+fn explain_exit_code(exit: Option<i32>) -> Option<&'static str> {
+    match exit? {
+        -1073740940 => Some(
+            "windows STATUS_HEAP_CORRUPTION (0xC0000374): process crashed; often tool/runtime corruption, native addon mismatch, or bad cache",
+        ),
+        -1073741819 => Some(
+            "windows STATUS_ACCESS_VIOLATION (0xC0000005): process crashed with invalid memory access",
+        ),
+        -1073741515 => Some(
+            "windows STATUS_DLL_NOT_FOUND (0xC0000135): missing runtime DLL/dependency",
+        ),
+        -1073740791 => Some(
+            "windows STATUS_STACK_BUFFER_OVERRUN (0xC0000409): process aborted due to stack corruption",
+        ),
+        137 => Some("process killed (likely OOM or SIGKILL)"),
+        139 => Some("segmentation fault (SIGSEGV)"),
+        _ => None,
+    }
 }

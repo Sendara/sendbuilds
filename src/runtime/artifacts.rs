@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ pub fn copy_workspace(src: &Path, dst: &Path) -> Result<()> {
 
 pub fn publish(
     src: &Path,
+    container_src: &Path,
     base_dir: &Path,
     project_name: &str,
     targets: &[String],
@@ -79,12 +81,12 @@ pub fn publish(
             }
             "container" | "container_image" => {
                 let image = container_image.unwrap_or("sendbuild:latest");
-                match build_container_image(src, image) {
+                match build_container_image(container_src, image) {
                     Ok(generated_dockerfile) => {
                         let out = root.join(format!("container-image-{image}.txt"));
                         let note = format!(
                             "image={image}\ndockerfile_generated={generated_dockerfile}\ncontext={}\n",
-                            src.display()
+                            container_src.display()
                         );
                         fs::write(&out, note)?;
                         outputs.push(out);
@@ -233,10 +235,16 @@ fn build_container_image(src: &Path, image: &str) -> Result<bool> {
     let dockerfile_path = src.join("Dockerfile");
     let mut generated_dockerfile = false;
     if !dockerfile_path.exists() {
-        let base = infer_distroless_base(src);
-        let dockerfile = format!("FROM {base}\nWORKDIR /app\nCOPY . /app\n");
+        let dockerfile = build_generated_dockerfile(src)?;
         fs::write(&dockerfile_path, dockerfile)?;
         generated_dockerfile = true;
+    } else {
+        let existing = fs::read_to_string(&dockerfile_path).unwrap_or_default();
+        if should_regenerate_generated_dockerfile(&existing) {
+            let dockerfile = build_generated_dockerfile(src)?;
+            fs::write(&dockerfile_path, dockerfile)?;
+            generated_dockerfile = true;
+        }
     }
 
     let status = Command::new("docker")
@@ -249,12 +257,27 @@ fn build_container_image(src: &Path, image: &str) -> Result<bool> {
     Ok(generated_dockerfile)
 }
 
-fn infer_distroless_base(src: &Path) -> &'static str {
+fn infer_runtime_base(src: &Path) -> &'static str {
+    if src.join("deno.json").exists() || src.join("deno.jsonc").exists() {
+        return "denoland/deno:alpine";
+    }
+    if src.join("mix.exs").exists() {
+        return "hexpm/elixir:1.17.3-erlang-27-alpine";
+    }
+    if src.join("gleam.toml").exists() {
+        return "ghcr.io/gleam-lang/gleam:latest";
+    }
     if src.join("package.json").exists() {
         return "gcr.io/distroless/nodejs20-debian12";
     }
     if src.join("requirements.txt").exists() || src.join("pyproject.toml").exists() {
         return "gcr.io/distroless/python3-debian12";
+    }
+    if src.join("go.mod").exists()
+        || src.join("Cargo.toml").exists()
+        || src.join("CMakeLists.txt").exists()
+    {
+        return "gcr.io/distroless/static-debian12";
     }
     if src.join("pom.xml").exists()
         || src.join("build.gradle").exists()
@@ -262,7 +285,781 @@ fn infer_distroless_base(src: &Path) -> &'static str {
     {
         return "gcr.io/distroless/java21-debian12";
     }
+    if src.join("global.json").exists() || has_glob_ext(src, "csproj") {
+        return "mcr.microsoft.com/dotnet/aspnet:8.0";
+    }
+    if src.join("composer.json").exists() || src.join("artisan").exists() {
+        return "php:8.3-cli-alpine";
+    }
+    if src.join("Gemfile").exists() {
+        return "ruby:3.3-alpine";
+    }
+    if src.join("index.html").exists() {
+        return "python:3.12-alpine";
+    }
+    if has_glob_ext(src, "sh") {
+        return "alpine:3.20";
+    }
     "gcr.io/distroless/static-debian12"
+}
+
+fn build_generated_dockerfile(src: &Path) -> Result<String> {
+    if src.join("package.json").exists() {
+        return build_generated_node_dockerfile(src);
+    }
+
+    let base = infer_runtime_base(src);
+    let (cmd, port) = infer_container_start(src)?;
+    let cmd_json = cmd
+        .iter()
+        .map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![
+        "# sendbuilds: auto-generated dockerfile".to_string(),
+        format!("FROM {base}"),
+        "WORKDIR /app".to_string(),
+        "COPY . /app".to_string(),
+    ];
+    if let Some(p) = port {
+        lines.push(format!("EXPOSE {p}"));
+    }
+    lines.push(format!("CMD [{cmd_json}]"));
+    Ok(lines.join("\n") + "\n")
+}
+
+fn build_generated_node_dockerfile(src: &Path) -> Result<String> {
+    let package_manager = detect_node_package_manager(src);
+    let has_build = has_package_script(src, "build");
+    let start_cmd = infer_node_start_command(src)?;
+    let start_cmd_json = start_cmd
+        .iter()
+        .map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![
+        "# sendbuilds: auto-generated dockerfile".to_string(),
+        "FROM node:20-alpine".to_string(),
+        "WORKDIR /app".to_string(),
+        "COPY . /app".to_string(),
+        "RUN corepack enable".to_string(),
+        format!(
+            "RUN {}",
+            install_with_fallback_command(package_manager, src)
+        ),
+    ];
+    if has_build {
+        lines.push(format!(
+            "RUN {}",
+            build_with_fallback_command(package_manager)
+        ));
+    }
+    lines.push("EXPOSE 3000".to_string());
+    lines.push(format!("CMD [{start_cmd_json}]"));
+    Ok(lines.join("\n") + "\n")
+}
+
+fn infer_node_start_command(src: &Path) -> Result<Vec<String>> {
+    let package_manager = detect_node_package_manager(src);
+    if has_package_script(src, "start") {
+        return Ok(match package_manager {
+            "pnpm" => vec!["pnpm".to_string(), "run".to_string(), "start".to_string()],
+            "yarn" => vec!["yarn".to_string(), "start".to_string()],
+            _ => vec!["npm".to_string(), "run".to_string(), "start".to_string()],
+        });
+    }
+    if has_next_dependency(src)
+        || src.join("next.config.js").exists()
+        || src.join("next.config.mjs").exists()
+        || src.join("next.config.ts").exists()
+        || src.join(".next").exists()
+    {
+        return Ok(match package_manager {
+            "pnpm" => vec![
+                "pnpm".to_string(),
+                "exec".to_string(),
+                "next".to_string(),
+                "start".to_string(),
+                "-p".to_string(),
+                "3000".to_string(),
+            ],
+            "yarn" => vec![
+                "yarn".to_string(),
+                "next".to_string(),
+                "start".to_string(),
+                "-p".to_string(),
+                "3000".to_string(),
+            ],
+            _ => vec![
+                "npx".to_string(),
+                "next".to_string(),
+                "start".to_string(),
+                "-p".to_string(),
+                "3000".to_string(),
+            ],
+        });
+    }
+    if has_package_script(src, "serve") {
+        return Ok(match package_manager {
+            "pnpm" => vec!["pnpm".to_string(), "run".to_string(), "serve".to_string()],
+            "yarn" => vec!["yarn".to_string(), "serve".to_string()],
+            _ => vec!["npm".to_string(), "run".to_string(), "serve".to_string()],
+        });
+    }
+    if has_package_script(src, "dev") {
+        return Ok(match package_manager {
+            "pnpm" => vec![
+                "pnpm".to_string(),
+                "run".to_string(),
+                "dev".to_string(),
+                "--".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "3000".to_string(),
+            ],
+            "yarn" => vec![
+                "yarn".to_string(),
+                "dev".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "3000".to_string(),
+            ],
+            _ => vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "dev".to_string(),
+                "--".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "3000".to_string(),
+            ],
+        });
+    }
+    if src
+        .join(".next")
+        .join("standalone")
+        .join("server.js")
+        .exists()
+    {
+        return Ok(vec![
+            "node".to_string(),
+            ".next/standalone/server.js".to_string(),
+        ]);
+    }
+    for candidate in ["server.js", "dist/server.js", "build/server.js", "index.js"] {
+        if src.join(candidate).exists() {
+            return Ok(vec!["node".to_string(), candidate.to_string()]);
+        }
+    }
+    anyhow::bail!(
+        "cannot infer Node start command. add scripts.start to package.json or provide Dockerfile"
+    );
+}
+
+fn infer_container_start(src: &Path) -> Result<(Vec<String>, Option<u16>)> {
+    if src.join("deno.json").exists() || src.join("deno.jsonc").exists() {
+        for candidate in ["main.ts", "mod.ts", "server.ts", "index.ts"] {
+            if src.join(candidate).exists() {
+                return Ok((
+                    vec![
+                        "deno".to_string(),
+                        "run".to_string(),
+                        "-A".to_string(),
+                        candidate.to_string(),
+                    ],
+                    Some(8000),
+                ));
+            }
+        }
+        anyhow::bail!(
+            "cannot infer Deno start command. add a Dockerfile or include main.ts/mod.ts/server.ts/index.ts"
+        );
+    }
+    if src.join("mix.exs").exists() {
+        if src.join("config").join("runtime.exs").exists()
+            || file_contains(&src.join("mix.exs"), "phoenix")
+        {
+            return Ok((
+                vec![
+                    "mix".to_string(),
+                    "phx.server".to_string(),
+                    "--no-halt".to_string(),
+                ],
+                Some(4000),
+            ));
+        }
+        return Ok((
+            vec![
+                "mix".to_string(),
+                "run".to_string(),
+                "--no-halt".to_string(),
+            ],
+            Some(4000),
+        ));
+    }
+    if src.join("gleam.toml").exists() {
+        return Ok((vec!["gleam".to_string(), "run".to_string()], Some(8000)));
+    }
+    if src.join("package.json").exists() {
+        if src
+            .join(".next")
+            .join("standalone")
+            .join("server.js")
+            .exists()
+        {
+            return Ok((vec![".next/standalone/server.js".to_string()], Some(3000)));
+        }
+        if src.join(".next").exists() {
+            return Ok((
+                vec!["npm".to_string(), "run".to_string(), "start".to_string()],
+                Some(3000),
+            ));
+        }
+        if let Some((cmd, port)) = infer_node_start_from_package_json(src) {
+            return Ok((cmd, port));
+        }
+        for candidate in [
+            "server.js",
+            "dist/server.js",
+            "build/server.js",
+            "index.js",
+            ".output/server/index.mjs",
+        ] {
+            if src.join(candidate).exists() {
+                return Ok((vec![candidate.to_string()], Some(3000)));
+            }
+        }
+        anyhow::bail!(
+            "cannot infer Node.js start command. add a Dockerfile or ensure server entry file exists (e.g. server.js, dist/server.js, .next/standalone/server.js)"
+        );
+    }
+    if src.join("requirements.txt").exists()
+        || src.join("pyproject.toml").exists()
+        || src.join("app.py").exists()
+    {
+        if src.join("manage.py").exists() {
+            return Ok((
+                vec![
+                    "python".to_string(),
+                    "manage.py".to_string(),
+                    "runserver".to_string(),
+                    "0.0.0.0:8000".to_string(),
+                ],
+                Some(8000),
+            ));
+        }
+        if src.join("wsgi.py").exists() {
+            return Ok((
+                vec![
+                    "python".to_string(),
+                    "-m".to_string(),
+                    "gunicorn".to_string(),
+                    "wsgi:app".to_string(),
+                    "--bind".to_string(),
+                    "0.0.0.0:8000".to_string(),
+                ],
+                Some(8000),
+            ));
+        }
+        if file_contains(&src.join("requirements.txt"), "flask")
+            || file_contains(&src.join("pyproject.toml"), "flask")
+        {
+            if src.join("app.py").exists() {
+                return Ok((vec!["python".to_string(), "app.py".to_string()], Some(8000)));
+            }
+            if src.join("main.py").exists() {
+                return Ok((
+                    vec!["python".to_string(), "main.py".to_string()],
+                    Some(8000),
+                ));
+            }
+        }
+        if src.join("app.py").exists() {
+            return Ok((vec!["python".to_string(), "app.py".to_string()], Some(8000)));
+        }
+        if src.join("main.py").exists() {
+            return Ok((
+                vec!["python".to_string(), "main.py".to_string()],
+                Some(8000),
+            ));
+        }
+        anyhow::bail!(
+            "cannot infer Python start command. add a Dockerfile or include app.py/main.py at repository root"
+        );
+    }
+    if src.join("pom.xml").exists()
+        || src.join("build.gradle").exists()
+        || src.join("build.gradle.kts").exists()
+    {
+        if let Some(jar) = find_first_jar(src) {
+            return Ok((
+                vec!["java".to_string(), "-jar".to_string(), jar],
+                Some(8080),
+            ));
+        }
+        anyhow::bail!(
+            "cannot infer Java start command. add a Dockerfile or ensure built .jar exists (target/ or build/libs/)"
+        );
+    }
+    if src.join("go.mod").exists() {
+        if let Some(bin) = find_first_executable(src, &["bin", ".", "dist"]) {
+            return Ok((vec![format!("./{bin}")], Some(8080)));
+        }
+        anyhow::bail!(
+            "cannot infer Go start command. add a Dockerfile or ensure a built binary exists in ./bin, ./dist, or repo root"
+        );
+    }
+    if src.join("Cargo.toml").exists() {
+        if let Some(bin) = find_first_executable(src, &["target/release", "bin", "."]) {
+            return Ok((vec![format!("./{bin}")], Some(8080)));
+        }
+        anyhow::bail!(
+            "cannot infer Rust start command. add a Dockerfile or ensure a release binary exists in target/release/"
+        );
+    }
+    if src.join("global.json").exists() || has_glob_ext(src, "csproj") {
+        if let Some(dll) = find_first_by_ext(src, &["bin/Release", "."], "dll") {
+            return Ok((vec!["dotnet".to_string(), dll], Some(8080)));
+        }
+        anyhow::bail!(
+            "cannot infer .NET start command. add a Dockerfile or ensure a publish/build .dll exists under bin/Release/"
+        );
+    }
+    if src.join("composer.json").exists() || src.join("artisan").exists() {
+        if src.join("artisan").exists() {
+            return Ok((
+                vec![
+                    "php".to_string(),
+                    "artisan".to_string(),
+                    "serve".to_string(),
+                    "--host=0.0.0.0".to_string(),
+                    "--port=8080".to_string(),
+                ],
+                Some(8080),
+            ));
+        }
+        if src.join("public").join("index.php").exists() {
+            return Ok((
+                vec![
+                    "php".to_string(),
+                    "-S".to_string(),
+                    "0.0.0.0:8080".to_string(),
+                    "-t".to_string(),
+                    "public".to_string(),
+                ],
+                Some(8080),
+            ));
+        }
+        if src.join("index.php").exists() {
+            return Ok((
+                vec![
+                    "php".to_string(),
+                    "-S".to_string(),
+                    "0.0.0.0:8080".to_string(),
+                    "index.php".to_string(),
+                ],
+                Some(8080),
+            ));
+        }
+        anyhow::bail!(
+            "cannot infer PHP start command. add a Dockerfile or ensure artisan/public/index.php exists"
+        );
+    }
+    if src.join("Gemfile").exists() {
+        if file_contains(&src.join("Gemfile"), "rails") && src.join("bin").join("rails").exists() {
+            return Ok((
+                vec![
+                    "bundle".to_string(),
+                    "exec".to_string(),
+                    "rails".to_string(),
+                    "server".to_string(),
+                    "-b".to_string(),
+                    "0.0.0.0".to_string(),
+                    "-p".to_string(),
+                    "3000".to_string(),
+                ],
+                Some(3000),
+            ));
+        }
+        if src.join("config.ru").exists() {
+            return Ok((
+                vec![
+                    "bundle".to_string(),
+                    "exec".to_string(),
+                    "rackup".to_string(),
+                    "-o".to_string(),
+                    "0.0.0.0".to_string(),
+                    "-p".to_string(),
+                    "9292".to_string(),
+                ],
+                Some(9292),
+            ));
+        }
+        if src.join("app.rb").exists() {
+            return Ok((vec!["ruby".to_string(), "app.rb".to_string()], Some(9292)));
+        }
+        anyhow::bail!(
+            "cannot infer Ruby start command. add a Dockerfile or ensure config.ru/app.rb exists"
+        );
+    }
+    if src.join("index.html").exists() {
+        return Ok((
+            vec![
+                "python".to_string(),
+                "-m".to_string(),
+                "http.server".to_string(),
+                "8080".to_string(),
+            ],
+            Some(8080),
+        ));
+    }
+    if has_glob_ext(src, "sh") {
+        for candidate in ["start.sh", "run.sh", "entrypoint.sh", "server.sh"] {
+            if src.join(candidate).exists() {
+                return Ok((vec!["sh".to_string(), candidate.to_string()], Some(8080)));
+            }
+        }
+        anyhow::bail!(
+            "cannot infer shell-script start command. add a Dockerfile or include start.sh/run.sh/entrypoint.sh"
+        );
+    }
+    if has_glob_ext(src, "c")
+        || has_glob_ext(src, "cpp")
+        || has_glob_ext(src, "cc")
+        || has_glob_ext(src, "cxx")
+    {
+        if let Some(bin) = find_first_executable(src, &["build", "bin", "."]) {
+            return Ok((vec![format!("./{bin}")], Some(8080)));
+        }
+        anyhow::bail!(
+            "cannot infer C/C++ start command. add a Dockerfile or ensure compiled binary exists in build/ or bin/"
+        );
+    }
+    anyhow::bail!(
+        "cannot infer container start command for this project. add a Dockerfile with explicit CMD/ENTRYPOINT"
+    );
+}
+
+fn find_first_jar(src: &Path) -> Option<String> {
+    let candidates = [
+        src.join("target"),
+        src.join("build").join("libs"),
+        src.to_path_buf(),
+    ];
+    for root in candidates {
+        if !root.exists() || !root.is_dir() {
+            continue;
+        }
+        if let Some(found) = find_first_jar_recursive(&root) {
+            let rel = found
+                .strip_prefix(src)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            return Some(rel);
+        }
+    }
+    None
+}
+
+fn find_first_jar_recursive(root: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_first_jar_recursive(&path) {
+                return Some(found);
+            }
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("jar"))
+            .unwrap_or(false)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn find_first_executable(src: &Path, roots: &[&str]) -> Option<String> {
+    for root_rel in roots {
+        let root = src.join(root_rel);
+        if !root.exists() || !root.is_dir() {
+            continue;
+        }
+        if let Some(found) = find_first_executable_recursive(&root) {
+            let rel = found
+                .strip_prefix(src)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            return Some(rel);
+        }
+    }
+    None
+}
+
+fn find_first_executable_recursive(root: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_first_executable_recursive(&path) {
+                return Some(found);
+            }
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.ends_with(".dll")
+            || name.ends_with(".jar")
+            || name.ends_with(".d")
+            || name.ends_with(".rlib")
+            || name.ends_with(".a")
+            || name.ends_with(".o")
+            || name.ends_with(".obj")
+            || name.ends_with(".pdb")
+            || name.ends_with(".map")
+        {
+            continue;
+        }
+        if path.extension().is_none() || name.ends_with(".exe") {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn find_first_by_ext(src: &Path, roots: &[&str], ext: &str) -> Option<String> {
+    for root_rel in roots {
+        let root = src.join(root_rel);
+        if !root.exists() || !root.is_dir() {
+            continue;
+        }
+        if let Some(found) = find_first_by_ext_recursive(&root, ext) {
+            let rel = found
+                .strip_prefix(src)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            return Some(rel);
+        }
+    }
+    None
+}
+
+fn find_first_by_ext_recursive(root: &Path, ext: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_first_by_ext_recursive(&path, ext) {
+                return Some(found);
+            }
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case(ext))
+            .unwrap_or(false)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn has_glob_ext(root: &Path, ext: &str) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            if p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case(ext))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            if ext == "csproj"
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".csproj"))
+                    .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn file_contains(path: &Path, needle: &str) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    fs::read_to_string(path)
+        .map(|v| v.to_lowercase().contains(&needle.to_lowercase()))
+        .unwrap_or(false)
+}
+
+fn infer_node_start_from_package_json(src: &Path) -> Option<(Vec<String>, Option<u16>)> {
+    let pkg = src.join("package.json");
+    let raw = fs::read_to_string(pkg).ok()?;
+    let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+
+    let start_script = parsed
+        .get("scripts")
+        .and_then(|s| s.get("start"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+
+    if !start_script.is_empty() {
+        if start_script == "next start" || start_script.starts_with("next start ") {
+            return Some((
+                vec!["npm".to_string(), "run".to_string(), "start".to_string()],
+                Some(3000),
+            ));
+        }
+        if let Some(rest) = start_script.strip_prefix("node ") {
+            let parts = rest
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if !parts.is_empty() {
+                return Some((parts, Some(3000)));
+            }
+        }
+    }
+
+    let main = parsed.get("main").and_then(Value::as_str).map(str::trim);
+    if let Some(main_file) = main {
+        if !main_file.is_empty() && src.join(main_file).exists() {
+            return Some((vec![main_file.to_string()], Some(3000)));
+        }
+    }
+    None
+}
+
+fn has_package_script(src: &Path, script: &str) -> bool {
+    let pkg = src.join("package.json");
+    let Ok(raw) = fs::read_to_string(pkg) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    parsed
+        .get("scripts")
+        .and_then(|s| s.get(script))
+        .and_then(Value::as_str)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn detect_node_package_manager(src: &Path) -> &'static str {
+    if let Some(pm) = package_manager_from_package_json(src) {
+        return pm;
+    }
+    if src.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if src.join("yarn.lock").exists() {
+        "yarn"
+    } else {
+        "npm"
+    }
+}
+
+fn package_manager_from_package_json(src: &Path) -> Option<&'static str> {
+    let pkg = src.join("package.json");
+    let raw = fs::read_to_string(pkg).ok()?;
+    let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+    let declared = parsed.get("packageManager").and_then(Value::as_str)?;
+    let lower = declared.to_lowercase();
+    if lower.starts_with("pnpm@") {
+        return Some("pnpm");
+    }
+    if lower.starts_with("yarn@") {
+        return Some("yarn");
+    }
+    if lower.starts_with("npm@") {
+        return Some("npm");
+    }
+    None
+}
+
+fn install_with_fallback_command(preferred: &str, src: &Path) -> String {
+    let npm_install = if src.join("package-lock.json").exists() {
+        "npm ci --include=dev || npm install --include=dev"
+    } else {
+        "npm install --include=dev"
+    };
+    match preferred {
+        "pnpm" => format!(
+            "(pnpm install --frozen-lockfile --prod=false || pnpm install --no-frozen-lockfile --prod=false || pnpm install --prod=false) || ({npm_install}) || (yarn install --production=false)"
+        ),
+        "yarn" => format!(
+            "(yarn install --frozen-lockfile --production=false || yarn install --production=false) || ({npm_install}) || (pnpm install --prod=false)"
+        ),
+        _ => format!(
+            "({npm_install}) || (pnpm install --frozen-lockfile --prod=false || pnpm install --prod=false) || (yarn install --production=false)"
+        ),
+    }
+}
+
+fn build_with_fallback_command(preferred: &str) -> String {
+    match preferred {
+        "pnpm" => "(pnpm run build || npm run build || yarn build)".to_string(),
+        "yarn" => "(yarn build || npm run build || pnpm run build)".to_string(),
+        _ => "(npm run build || pnpm run build || yarn build)".to_string(),
+    }
+}
+
+fn has_next_dependency(src: &Path) -> bool {
+    let pkg = src.join("package.json");
+    let Ok(raw) = fs::read_to_string(pkg) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    for field in ["dependencies", "devDependencies"] {
+        if parsed
+            .get(field)
+            .and_then(Value::as_object)
+            .map(|m| m.contains_key("next"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn should_regenerate_generated_dockerfile(existing: &str) -> bool {
+    let lower = existing.to_lowercase();
+    if lower.contains("# sendbuilds: auto-generated dockerfile") {
+        return true;
+    }
+    // Legacy auto-generated Next.js command that fails when deps are absent at runtime.
+    if lower.contains("node_modules/next/dist/bin/next") {
+        return true;
+    }
+    false
 }
 
 fn create_kubernetes_manifests(
