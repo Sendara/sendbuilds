@@ -11,7 +11,7 @@ use crate::core::{BuildConfig, BuildContext, Step, StepStatus};
 use crate::errors::BuildError;
 use crate::languages;
 use crate::output::{events, logger as log};
-use crate::runtime::{artifacts, git, intelligence, metrics, scan, shell};
+use crate::runtime::{artifacts, git, intelligence, metrics, scan, security, shell};
 use crate::utils::cache::{
     changed_modules, compute_dependency_fingerprint, compute_file_signatures,
     fingerprint_from_signatures, BuildCache, BuildState,
@@ -109,6 +109,9 @@ impl BuildEngine {
         let mut cache_metrics = CacheMetrics::default();
         let mut publish_result: Option<artifacts::PublishResult> = None;
         let mut dependency_report: Option<intelligence::DependencyIntelligenceReport> = None;
+        let mut security_report: Option<security::SecurityReport> = None;
+        let mut security_sbom: Option<Value> = None;
+        let mut supply_chain_metadata: Option<Value> = None;
 
         let cache = self.configure_cache(&ctx)?;
         if let Some(c) = &cache {
@@ -126,6 +129,7 @@ impl BuildEngine {
         let mut dep_install_cmd = String::new();
         let mut changed = vec!["all".to_string()];
         let mut resolved_language = String::new();
+        let security_enabled = security::enabled(cfg.security.as_ref());
 
         steps.push(self.execute_step(&ctx, "source", |_e, c, s| self.step_source(c, s))?);
         steps.push(self.execute_step(&ctx, "detect-build-config", |_e, c, s| {
@@ -202,6 +206,30 @@ impl BuildEngine {
             }
             Ok(())
         })?);
+        if security_enabled {
+            let lang = resolved_language.clone();
+            let security_cfg = cfg.security.clone();
+            let in_place_mode = self.in_place;
+            steps.push(self.execute_step(&ctx, "security-first", |_e, cctx, step| {
+                let out = security::run(
+                    &lang,
+                    security_cfg.as_ref(),
+                    cfg,
+                    &cctx.work_dir,
+                    &cctx.env,
+                    sandbox_enabled,
+                    in_place_mode,
+                )?;
+                for line in security::to_build_logs(&out.report) {
+                    step.push_log(line.clone());
+                    log::pipe(&line);
+                }
+                security_sbom = Some(out.sbom);
+                supply_chain_metadata = Some(out.supply_chain_metadata);
+                security_report = Some(out.report);
+                Ok(())
+            })?);
+        }
         if intelligence::enabled(cfg.intelligence.as_ref()) {
             let lang = resolved_language.clone();
             let intel_cfg = cfg.intelligence.clone();
@@ -225,7 +253,7 @@ impl BuildEngine {
         }
 
         let mut post = Vec::new();
-        if scan::enabled(cfg.scan.as_ref()) {
+        if !security_enabled && scan::enabled(cfg.scan.as_ref()) {
             let lang = resolved_language.clone();
             let scan_cfg = cfg.scan.clone();
             let wd = ctx.work_dir.clone();
@@ -382,7 +410,9 @@ impl BuildEngine {
                 "project": cfg.project.name,
                 "finished_at": chrono::Local::now().to_rfc3339(),
                 "cache": cache_metrics,
+                "security": &security_report,
                 "dependency_intelligence": &dependency_report,
+                "supply_chain_metadata": &supply_chain_metadata,
                 "steps": metrics_steps
             });
             let root = publish_result
@@ -394,6 +424,21 @@ impl BuildEngine {
                 let dep_out = root.join("dependency-intelligence-report.json");
                 fs::write(&dep_out, serde_json::to_vec_pretty(dep_report)?)?;
                 step.push_log(format!("dependency intelligence {}", dep_out.display()));
+            }
+            if let Some(sbom) = &security_sbom {
+                let sbom_out = root.join("sbom.json");
+                fs::write(&sbom_out, serde_json::to_vec_pretty(sbom)?)?;
+                step.push_log(format!("sbom {}", sbom_out.display()));
+            }
+            if let Some(supply) = &supply_chain_metadata {
+                let supply_out = root.join("supply-chain-metadata.json");
+                fs::write(&supply_out, serde_json::to_vec_pretty(supply)?)?;
+                step.push_log(format!("supply chain metadata {}", supply_out.display()));
+            }
+            if let Some(sec_report) = &security_report {
+                let security_out = root.join("security-report.json");
+                fs::write(&security_out, serde_json::to_vec_pretty(sec_report)?)?;
+                step.push_log(format!("security report {}", security_out.display()));
             }
             let out = root.join("build-metrics.json");
             fs::write(&out, serde_json::to_vec_pretty(&report)?)?;

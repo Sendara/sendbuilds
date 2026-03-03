@@ -13,6 +13,7 @@ pub struct BuildConfig {
     pub cache: Option<CacheConfig>,
     pub scan: Option<ScanConfig>,
     pub intelligence: Option<IntelligenceConfig>,
+    pub security: Option<SecurityConfig>,
     pub env: Option<HashMap<String, String>>,
     pub env_from_host: Option<Vec<String>>,
     pub sandbox: Option<SandboxConfig>,
@@ -85,6 +86,17 @@ pub struct IntelligenceConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct SecurityConfig {
+    pub enabled: Option<bool>,
+    pub fail_on_critical: Option<bool>,
+    pub critical_threshold: Option<u32>,
+    pub generate_sbom: Option<bool>,
+    pub auto_distroless: Option<bool>,
+    pub distroless_base: Option<String>,
+    pub rewrite_dockerfile_in_place: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct SandboxConfig {
     pub enabled: Option<bool>,
 }
@@ -135,6 +147,7 @@ impl BuildConfig {
             cache: None,
             scan: None,
             intelligence: None,
+            security: None,
             env: None,
             env_from_host: None,
             sandbox: None,

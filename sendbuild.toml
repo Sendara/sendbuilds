@@ -43,6 +43,15 @@ command = "npm audit --json --omit=dev --audit-level=high"
 [intelligence]
 enabled = true
 
+[security]
+enabled = true
+fail_on_critical = true
+critical_threshold = 0
+generate_sbom = true
+auto_distroless = true
+# distroless_base = "gcr.io/distroless/nodejs20-debian12"
+# rewrite_dockerfile_in_place = false
+
 [sandbox]
 enabled = true
 
