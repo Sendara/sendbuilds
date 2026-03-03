@@ -4,7 +4,12 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::core::config::{
+    CacheConfig, DeployConfig, IntelligenceConfig, ProjectConfig, SandboxConfig, ScanConfig,
+    SecurityConfig, SigningConfig, SourceConfig,
+};
 use crate::core::BuildConfig;
 use crate::engine::BuildEngine;
 
@@ -22,6 +27,14 @@ enum Cmd {
         config: String,
         #[arg(long)]
         in_place: bool,
+        #[arg(long)]
+        git: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        docker: bool,
+        #[arg(long)]
+        image: Option<String>,
     },
     Init {
         #[arg(long)]
@@ -64,7 +77,17 @@ enum CacheCmd {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { config, in_place } => {
+        Cmd::Build {
+            config,
+            in_place,
+            git,
+            branch,
+            docker,
+            image,
+        } => {
+            if git.is_some() || docker {
+                return run_quick_build(git, branch, docker, image, in_place);
+            }
             if BuildConfig::exists(&config) {
                 BuildEngine::load(&config)?.with_in_place(in_place).run()
             } else {
@@ -89,6 +112,124 @@ pub fn run() -> Result<()> {
             dependencies,
         } => info(&config, env, dependencies),
     }
+}
+
+fn run_quick_build(
+    git_repo: Option<String>,
+    git_branch: Option<String>,
+    docker: bool,
+    image: Option<String>,
+    in_place: bool,
+) -> Result<()> {
+    let has_git = git_repo.is_some();
+    let name = git_repo
+        .as_deref()
+        .map(project_name_from_repo)
+        .unwrap_or_else(|| local_project_name());
+    let image_tag = image.unwrap_or_else(|| format!("{name}:latest"));
+    let mut targets = vec!["directory".to_string()];
+    if docker {
+        targets.push("container_image".to_string());
+    }
+
+    ensure_signing_key("SENDBUILD_SIGNING_KEY_AUTO");
+
+    let cfg = BuildConfig {
+        project: ProjectConfig {
+            name: name.clone(),
+            language: None,
+        },
+        source: git_repo.map(|repo| SourceConfig {
+            repo,
+            branch: git_branch,
+            commit: None,
+        }),
+        build: None,
+        deploy: DeployConfig {
+            artifact_dir: "./artifacts".to_string(),
+            targets: Some(targets),
+            container_image: Some(image_tag),
+            kubernetes: None,
+            gc: None,
+        },
+        cache: Some(CacheConfig {
+            enabled: Some(true),
+            dir: None,
+        }),
+        scan: Some(ScanConfig {
+            enabled: Some(false),
+            command: None,
+        }),
+        intelligence: Some(IntelligenceConfig {
+            enabled: Some(true),
+        }),
+        security: Some(SecurityConfig {
+            enabled: Some(true),
+            fail_on_critical: Some(true),
+            critical_threshold: Some(0),
+            generate_sbom: Some(true),
+            auto_distroless: Some(true),
+            distroless_base: None,
+            rewrite_dockerfile_in_place: Some(false),
+        }),
+        env: None,
+        env_from_host: None,
+        sandbox: Some(SandboxConfig {
+            enabled: Some(true),
+        }),
+        signing: Some(SigningConfig {
+            enabled: Some(true),
+            key_env: Some("SENDBUILD_SIGNING_KEY_AUTO".to_string()),
+        }),
+        compatibility: None,
+    };
+
+    BuildEngine::from_config(cfg)
+        .with_in_place(in_place || !has_git)
+        .run()
+}
+
+fn local_project_name() -> String {
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            cwd.file_name()
+                .and_then(|n| n.to_str().map(ToString::to_string))
+        })
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "local-app".to_string())
+}
+
+fn project_name_from_repo(repo: &str) -> String {
+    let trimmed = repo.trim_end_matches('/').trim();
+    let last = trimmed.rsplit('/').next().unwrap_or("app");
+    let no_git = last.strip_suffix(".git").unwrap_or(last);
+    let mut out = String::new();
+    for ch in no_git.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' || ch == '.' {
+            out.push('-');
+        }
+    }
+    let normalized = out.trim_matches('-').to_string();
+    if normalized.is_empty() {
+        "app".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn ensure_signing_key(key_env: &str) {
+    if env::var(key_env).is_ok() {
+        return;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    env::set_var(key_env, format!("sendbuilds-auto-key-{pid}-{nanos}"));
 }
 
 fn init_project(template: Option<&str>, _yes: bool) -> Result<()> {

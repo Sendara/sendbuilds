@@ -49,6 +49,7 @@ If `[source]` is omitted in `sendbuild.toml`, `sendbuilds` uses the current work
 ```bash
 sendbuilds build [--config sendbuild.toml]
 sendbuilds build [--config sendbuild.toml] [--in-place]
+sendbuilds build --git <repo> --docker [--branch <name>] [--image <tag>]
 sendbuilds init [--template <framework>] [--yes]
 sendbuilds cache save|restore|clear|status [--config sendbuild.toml]
 sendbuilds clean [--all] [--cache-only] [--config sendbuild.toml]
@@ -57,6 +58,7 @@ sendbuilds info [--env] [--dependencies] [--config sendbuild.toml]
 
 Use `--in-place` to build directly in the current workspace instead of a temp copy (useful for Next.js `pnpm start` expecting `.next` in project root).
 If `sendbuild.toml` is missing, `sendbuilds build` automatically falls back to a smart local mode with inferred defaults and in-place build.
+For zero-config enterprise mode, use `sendbuilds build --git <repo> --docker`: it auto-generates runtime config, enables security-first checks, signs artifacts, emits SBOM/supply-chain metadata, and builds container images even when no Dockerfile exists.
 
 ## Minimal config
 

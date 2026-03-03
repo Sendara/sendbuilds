@@ -80,7 +80,15 @@ pub fn publish(
             "container" | "container_image" => {
                 let image = container_image.unwrap_or("sendbuild:latest");
                 match build_container_image(src, image) {
-                    Ok(()) => outputs.push(root.join(format!("container-image-{image}.txt"))),
+                    Ok(generated_dockerfile) => {
+                        let out = root.join(format!("container-image-{image}.txt"));
+                        let note = format!(
+                            "image={image}\ndockerfile_generated={generated_dockerfile}\ncontext={}\n",
+                            src.display()
+                        );
+                        fs::write(&out, note)?;
+                        outputs.push(out);
+                    }
                     Err(err) => warnings.push(format!("container image build skipped: {err}")),
                 }
             }
@@ -212,7 +220,7 @@ fn zip_dir(
     Ok(())
 }
 
-fn build_container_image(src: &Path, image: &str) -> Result<()> {
+fn build_container_image(src: &Path, image: &str) -> Result<bool> {
     let docker_available = Command::new("docker")
         .arg("--version")
         .output()
@@ -222,6 +230,15 @@ fn build_container_image(src: &Path, image: &str) -> Result<()> {
         anyhow::bail!("docker not available");
     }
 
+    let dockerfile_path = src.join("Dockerfile");
+    let mut generated_dockerfile = false;
+    if !dockerfile_path.exists() {
+        let base = infer_distroless_base(src);
+        let dockerfile = format!("FROM {base}\nWORKDIR /app\nCOPY . /app\n");
+        fs::write(&dockerfile_path, dockerfile)?;
+        generated_dockerfile = true;
+    }
+
     let status = Command::new("docker")
         .args(["build", "-t", image, "."])
         .current_dir(src)
@@ -229,7 +246,23 @@ fn build_container_image(src: &Path, image: &str) -> Result<()> {
     if !status.success() {
         anyhow::bail!("docker build failed");
     }
-    Ok(())
+    Ok(generated_dockerfile)
+}
+
+fn infer_distroless_base(src: &Path) -> &'static str {
+    if src.join("package.json").exists() {
+        return "gcr.io/distroless/nodejs20-debian12";
+    }
+    if src.join("requirements.txt").exists() || src.join("pyproject.toml").exists() {
+        return "gcr.io/distroless/python3-debian12";
+    }
+    if src.join("pom.xml").exists()
+        || src.join("build.gradle").exists()
+        || src.join("build.gradle.kts").exists()
+    {
+        return "gcr.io/distroless/java21-debian12";
+    }
+    "gcr.io/distroless/static-debian12"
 }
 
 fn create_kubernetes_manifests(
