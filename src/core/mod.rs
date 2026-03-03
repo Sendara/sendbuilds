@@ -2,6 +2,6 @@ pub mod config;
 pub mod context;
 pub mod step;
 
-pub use config::{BuildConfig, ScanConfig};
+pub use config::{BuildConfig, IntelligenceConfig, ScanConfig};
 pub use context::BuildContext;
 pub use step::{Step, StepResources, StepStatus};

@@ -11,7 +11,7 @@ use crate::core::{BuildConfig, BuildContext, Step, StepStatus};
 use crate::errors::BuildError;
 use crate::languages;
 use crate::output::{events, logger as log};
-use crate::runtime::{artifacts, git, metrics, scan, shell};
+use crate::runtime::{artifacts, git, intelligence, metrics, scan, shell};
 use crate::utils::cache::{
     changed_modules, compute_dependency_fingerprint, compute_file_signatures,
     fingerprint_from_signatures, BuildCache, BuildState,
@@ -108,6 +108,7 @@ impl BuildEngine {
         let mut steps: Vec<Step> = Vec::new();
         let mut cache_metrics = CacheMetrics::default();
         let mut publish_result: Option<artifacts::PublishResult> = None;
+        let mut dependency_report: Option<intelligence::DependencyIntelligenceReport> = None;
 
         let cache = self.configure_cache(&ctx)?;
         if let Some(c) = &cache {
@@ -201,6 +202,27 @@ impl BuildEngine {
             }
             Ok(())
         })?);
+        if intelligence::enabled(cfg.intelligence.as_ref()) {
+            let lang = resolved_language.clone();
+            let intel_cfg = cfg.intelligence.clone();
+            steps.push(
+                self.execute_step(&ctx, "dependency-intelligence", |_e, cctx, step| {
+                    let report = intelligence::run(
+                        &lang,
+                        intel_cfg.as_ref(),
+                        &cctx.work_dir,
+                        &cctx.env,
+                        sandbox_enabled,
+                    )?;
+                    for line in intelligence::to_build_logs(&report) {
+                        step.push_log(line.clone());
+                        log::pipe(&line);
+                    }
+                    dependency_report = Some(report);
+                    Ok(())
+                })?,
+            );
+        }
 
         let mut post = Vec::new();
         if scan::enabled(cfg.scan.as_ref()) {
@@ -360,6 +382,7 @@ impl BuildEngine {
                 "project": cfg.project.name,
                 "finished_at": chrono::Local::now().to_rfc3339(),
                 "cache": cache_metrics,
+                "dependency_intelligence": &dependency_report,
                 "steps": metrics_steps
             });
             let root = publish_result
@@ -367,6 +390,11 @@ impl BuildEngine {
                 .map(|p| p.root.clone())
                 .unwrap_or_else(|| ctx.artifact_dir.clone());
             fs::create_dir_all(&root)?;
+            if let Some(dep_report) = &dependency_report {
+                let dep_out = root.join("dependency-intelligence-report.json");
+                fs::write(&dep_out, serde_json::to_vec_pretty(dep_report)?)?;
+                step.push_log(format!("dependency intelligence {}", dep_out.display()));
+            }
             let out = root.join("build-metrics.json");
             fs::write(&out, serde_json::to_vec_pretty(&report)?)?;
             step.push_log(format!("metrics {}", out.display()));

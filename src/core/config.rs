@@ -12,6 +12,7 @@ pub struct BuildConfig {
     pub deploy: DeployConfig,
     pub cache: Option<CacheConfig>,
     pub scan: Option<ScanConfig>,
+    pub intelligence: Option<IntelligenceConfig>,
     pub env: Option<HashMap<String, String>>,
     pub env_from_host: Option<Vec<String>>,
     pub sandbox: Option<SandboxConfig>,
@@ -79,6 +80,11 @@ pub struct ScanConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct IntelligenceConfig {
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct SandboxConfig {
     pub enabled: Option<bool>,
 }
@@ -128,6 +134,7 @@ impl BuildConfig {
             },
             cache: None,
             scan: None,
+            intelligence: None,
             env: None,
             env_from_host: None,
             sandbox: None,

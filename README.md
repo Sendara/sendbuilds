@@ -113,6 +113,9 @@ dir = "./artifacts/.sendbuild-cache"
 enabled = true
 command = "npm audit --json --omit=dev --audit-level=high"
 
+[intelligence]
+enabled = true
+
 [sandbox]
 enabled = true
 
@@ -154,6 +157,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 8. Multi-language support: Node.js, Python, Ruby, Go, Java, PHP, Rust, Static Sites, Shell Scripts, C/C++, Gleam, Elixir, Deno, and .NET.
 9. Multi-framework support: Next.js, Rails, Django, Flask, Spring (Maven/Gradle), Laravel, plus generic toolchain detection by language.
 10. Automatic artifact garbage collection: optional `[deploy.gc]` retention by count and age after each successful deploy.
+11. Smart Dependency Intelligence Buildpack: analyzes dependency trees, flags outdated packages, suggests lighter alternatives, prints optimization hints during build, and writes `dependency-intelligence-report.json`.
 
 ## Security scan failure details
 
@@ -171,6 +175,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 - Deploy artifacts are emitted under timestamped directories in `deploy.artifact_dir`.
 - With target `kubernetes`, `sendbuilds` writes `kubernetes/deployment.yaml` and `kubernetes/service.yaml` into the artifact root.
 - If `[deploy.gc].enabled = true`, old timestamped artifact directories are pruned automatically after deploy.
+- Dependency intelligence output is written to artifact root as `dependency-intelligence-report.json` and embedded in `build-metrics.json`.
 - For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.
 
 ## Contributing
