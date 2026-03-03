@@ -21,6 +21,7 @@ use crate::workers::parallel::{self, ParallelStepTask};
 
 pub struct BuildEngine {
     config: BuildConfig,
+    in_place: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,7 +51,15 @@ struct StepMetric {
 impl BuildEngine {
     pub fn load(config_path: &str) -> Result<Self> {
         let config = BuildConfig::from_file(config_path)?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            in_place: false,
+        })
+    }
+
+    pub fn with_in_place(mut self, in_place: bool) -> Self {
+        self.in_place = in_place;
+        self
     }
 
     pub fn run(self) -> Result<()> {
@@ -58,7 +67,11 @@ impl BuildEngine {
 
         let env_map = self.resolve_env();
         let sandbox_enabled = cfg.sandbox.as_ref().and_then(|s| s.enabled).unwrap_or(true);
-        let work_dir = artifacts::make_workdir(&cfg.project.name)?;
+        let work_dir = if self.in_place && cfg.source.is_none() {
+            std::env::current_dir()?
+        } else {
+            artifacts::make_workdir(&cfg.project.name)?
+        };
         let artifact_dir = Path::new(&cfg.deploy.artifact_dir).to_path_buf();
         let ctx = BuildContext::new(&cfg.project.name, work_dir, artifact_dir, env_map);
 
@@ -69,7 +82,14 @@ impl BuildEngine {
         );
         match &cfg.source {
             Some(source) => log::kv("repo", &source.repo),
-            None => log::kv("source", "local workspace"),
+            None => log::kv(
+                "source",
+                if self.in_place {
+                    "local workspace (in-place mode)"
+                } else {
+                    "local workspace (copied to temp)"
+                },
+            ),
         }
         log::kv("workdir", &ctx.work_dir.display().to_string());
         log::kv(
@@ -794,6 +814,11 @@ impl BuildEngine {
             } else if let Some(branch) = &src.branch {
                 git::checkout(&ctx.work_dir, branch)?;
             }
+        } else if self.in_place {
+            step.push_log(format!(
+                "using current workspace in place {}",
+                ctx.work_dir.display()
+            ));
         } else {
             let cwd = std::env::current_dir()?;
             step.push_log(format!("copy local workspace {}", cwd.display()));

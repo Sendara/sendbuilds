@@ -48,11 +48,14 @@ If `[source]` is omitted in `sendbuild.toml`, `sendbuilds` uses the current work
 
 ```bash
 sendbuilds build [--config sendbuild.toml]
+sendbuilds build [--config sendbuild.toml] [--in-place]
 sendbuilds init [--template <framework>] [--yes]
 sendbuilds cache save|restore|clear|status [--config sendbuild.toml]
 sendbuilds clean [--all] [--cache-only] [--config sendbuild.toml]
 sendbuilds info [--env] [--dependencies] [--config sendbuild.toml]
 ```
+
+Use `--in-place` to build directly in the current workspace instead of a temp copy (useful for Next.js `pnpm start` expecting `.next` in project root).
 
 ## Minimal config
 

@@ -20,6 +20,8 @@ enum Cmd {
     Build {
         #[arg(short, long, default_value = "sendbuild.toml")]
         config: String,
+        #[arg(long)]
+        in_place: bool,
     },
     Init {
         #[arg(long)]
@@ -62,7 +64,9 @@ enum CacheCmd {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { config } => BuildEngine::load(&config)?.run(),
+        Cmd::Build { config, in_place } => {
+            BuildEngine::load(&config)?.with_in_place(in_place).run()
+        }
         Cmd::Init { template, yes } => init_project(template.as_deref(), yes),
         Cmd::Cache { cmd, config } => run_cache(cmd, &config),
         Cmd::Clean {
