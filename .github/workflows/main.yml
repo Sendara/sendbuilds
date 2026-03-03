@@ -63,9 +63,14 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary
+        shell: bash
         run: |
-          mkdir dist
-          cp target/${{ matrix.target }}/release/sendbuilds* dist/${{ matrix.name }}
+          mkdir -p dist
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            cp "target/${{ matrix.target }}/release/sendbuilds.exe" "dist/${{ matrix.name }}"
+          else
+            cp "target/${{ matrix.target }}/release/sendbuilds" "dist/${{ matrix.name }}"
+          fi
 
       - name: Upload Release
         uses: softprops/action-gh-release@v2
