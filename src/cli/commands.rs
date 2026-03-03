@@ -65,7 +65,16 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Build { config, in_place } => {
-            BuildEngine::load(&config)?.with_in_place(in_place).run()
+            if BuildConfig::exists(&config) {
+                BuildEngine::load(&config)?.with_in_place(in_place).run()
+            } else {
+                println!(
+                    "No config file found at '{}'. Running smart local build mode.",
+                    config
+                );
+                let cfg = BuildConfig::for_local_workspace()?;
+                BuildEngine::from_config(cfg).with_in_place(true).run()
+            }
         }
         Cmd::Init { template, yes } => init_project(template.as_deref(), yes),
         Cmd::Cache { cmd, config } => run_cache(cmd, &config),

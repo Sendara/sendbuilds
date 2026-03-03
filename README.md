@@ -56,6 +56,7 @@ sendbuilds info [--env] [--dependencies] [--config sendbuild.toml]
 ```
 
 Use `--in-place` to build directly in the current workspace instead of a temp copy (useful for Next.js `pnpm start` expecting `.next` in project root).
+If `sendbuild.toml` is missing, `sendbuilds build` automatically falls back to a smart local mode with inferred defaults and in-place build.
 
 ## Minimal config
 

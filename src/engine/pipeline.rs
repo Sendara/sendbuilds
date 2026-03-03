@@ -49,12 +49,16 @@ struct StepMetric {
 }
 
 impl BuildEngine {
-    pub fn load(config_path: &str) -> Result<Self> {
-        let config = BuildConfig::from_file(config_path)?;
-        Ok(Self {
+    pub fn from_config(config: BuildConfig) -> Self {
+        Self {
             config,
             in_place: false,
-        })
+        }
+    }
+
+    pub fn load(config_path: &str) -> Result<Self> {
+        let config = BuildConfig::from_file(config_path)?;
+        Ok(Self::from_config(config))
     }
 
     pub fn with_in_place(mut self, in_place: bool) -> Self {

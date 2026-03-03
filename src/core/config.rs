@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct BuildConfig {
@@ -100,5 +101,42 @@ impl BuildConfig {
         let raw = fs::read_to_string(path).with_context(|| format!("cant read config: {path}"))?;
 
         toml::from_str(&raw).with_context(|| "config parse failed")
+    }
+
+    pub fn for_local_workspace() -> Result<Self> {
+        let cwd = std::env::current_dir().with_context(|| "cant resolve current directory")?;
+        let name = cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or("local-app")
+            .to_string();
+
+        Ok(Self {
+            project: ProjectConfig {
+                name,
+                language: None,
+            },
+            source: None,
+            build: None,
+            deploy: DeployConfig {
+                artifact_dir: "./artifacts".to_string(),
+                targets: Some(vec!["directory".to_string()]),
+                container_image: None,
+                kubernetes: None,
+                gc: None,
+            },
+            cache: None,
+            scan: None,
+            env: None,
+            env_from_host: None,
+            sandbox: None,
+            signing: None,
+            compatibility: None,
+        })
+    }
+
+    pub fn exists(path: &str) -> bool {
+        Path::new(path).exists()
     }
 }
