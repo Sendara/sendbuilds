@@ -153,30 +153,66 @@ fn analyze_nodejs(
         );
     }
 
-    let tree_run = shell::run_allow_failure("npm ls --all --json", work_dir, env, sandbox)?;
-    if let Some(raw_json) = collect_json(&tree_run.logs) {
-        if let Ok(tree) = serde_json::from_str::<Value>(&raw_json) {
-            walk_dependency_tree(
-                &tree,
-                0,
-                &mut total,
-                &mut unique,
-                &mut name_counts,
-                &mut max_depth,
-            );
+    if !collect_tree_from_lockfile(
+        work_dir,
+        &mut total,
+        &mut unique,
+        &mut name_counts,
+        &mut max_depth,
+    ) {
+        // Fallback to shallow tree only; full depth is too slow on large repos.
+        let tree_run = shell::run_allow_failure("npm ls --json --depth=1", work_dir, env, sandbox)?;
+        if let Some(raw_json) = collect_json(&tree_run.logs) {
+            if let Ok(tree) = serde_json::from_str::<Value>(&raw_json) {
+                walk_dependency_tree(
+                    &tree,
+                    0,
+                    &mut total,
+                    &mut unique,
+                    &mut name_counts,
+                    &mut max_depth,
+                );
+            } else {
+                report.notes.push(
+                    "npm ls output was not valid json; dependency tree stats are partial"
+                        .to_string(),
+                );
+            }
         } else {
             report.notes.push(
-                "npm ls output was not valid json; dependency tree stats are partial".to_string(),
+                "npm ls produced no json output; dependency tree stats are partial".to_string(),
             );
+        }
+        if !tree_run.success {
+            report.notes.push(format!(
+                "npm ls exited with {:?}; this often indicates peer/optional dependency issues",
+                tree_run.exit_code
+            ));
         }
     } else {
         report
             .notes
-            .push("npm ls produced no json output; dependency tree stats are partial".to_string());
+            .push("tree stats derived from lockfile for faster analysis".to_string());
     }
 
-    let outdated_run = shell::run_allow_failure("npm outdated --json", work_dir, env, sandbox)?;
-    let outdated = parse_npm_outdated(&outdated_run.logs);
+    let outdated = if direct_dependencies.len() <= 60 {
+        let cmd = "npm outdated --json --depth=0 --omit=dev";
+        let outdated_run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
+        let parsed = parse_npm_outdated(&outdated_run.logs);
+        if !outdated_run.success && parsed.is_empty() {
+            report.notes.push(format!(
+                "npm outdated exited with {:?}; continuing with available data",
+                outdated_run.exit_code
+            ));
+        }
+        parsed
+    } else {
+        report.notes.push(format!(
+            "skipped npm outdated in fast mode (direct dependencies={})",
+            direct_dependencies.len()
+        ));
+        Vec::new()
+    };
 
     let duplicate_packages = name_counts.values().filter(|v| **v > 1).count();
     report.summary.total_dependencies = total;
@@ -189,19 +225,6 @@ fn analyze_nodejs(
     report.optimization_hints = generate_node_hints(report);
     report.summary.health_score = compute_health_score(report);
     report.summary.health_grade = grade_for_score(report.summary.health_score);
-
-    if !tree_run.success {
-        report.notes.push(format!(
-            "npm ls exited with {:?}; this often indicates peer/optional dependency issues",
-            tree_run.exit_code
-        ));
-    }
-    if !outdated_run.success && report.outdated_packages.is_empty() {
-        report.notes.push(format!(
-            "npm outdated exited with {:?}; continuing with available data",
-            outdated_run.exit_code
-        ));
-    }
 
     Ok(())
 }
@@ -441,6 +464,42 @@ fn collect_json(logs: &[String]) -> Option<String> {
         return None;
     }
     Some(body[start..=end].to_string())
+}
+
+fn collect_tree_from_lockfile(
+    work_dir: &Path,
+    total: &mut usize,
+    unique: &mut HashSet<String>,
+    name_counts: &mut HashMap<String, usize>,
+    max_depth: &mut usize,
+) -> bool {
+    let lockfile = work_dir.join("package-lock.json");
+    if !lockfile.exists() {
+        return false;
+    }
+    let Some(lock) = read_json(&lockfile) else {
+        return false;
+    };
+    let Some(packages) = lock.get("packages").and_then(Value::as_object) else {
+        return false;
+    };
+
+    for (path, entry) in packages {
+        if path.is_empty() {
+            continue;
+        }
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| path.rsplit('/').next())
+            .unwrap_or("unknown");
+        *total += 1;
+        unique.insert(name.to_string());
+        *name_counts.entry(name.to_string()).or_insert(0) += 1;
+        let depth = path.matches("node_modules/").count();
+        *max_depth = (*max_depth).max(depth);
+    }
+    true
 }
 
 fn normalize_language(language: &str) -> String {

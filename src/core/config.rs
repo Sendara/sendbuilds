@@ -12,7 +12,6 @@ pub struct BuildConfig {
     pub deploy: DeployConfig,
     pub cache: Option<CacheConfig>,
     pub scan: Option<ScanConfig>,
-    pub intelligence: Option<IntelligenceConfig>,
     pub security: Option<SecurityConfig>,
     pub env: Option<HashMap<String, String>>,
     pub env_from_host: Option<Vec<String>>,
@@ -81,11 +80,6 @@ pub struct ScanConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct IntelligenceConfig {
-    pub enabled: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct SecurityConfig {
     pub enabled: Option<bool>,
     pub fail_on_critical: Option<bool>,
@@ -146,7 +140,6 @@ impl BuildConfig {
             },
             cache: None,
             scan: None,
-            intelligence: None,
             security: None,
             env: None,
             env_from_host: None,

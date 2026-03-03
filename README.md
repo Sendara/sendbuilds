@@ -119,9 +119,6 @@ dir = "./artifacts/.sendbuild-cache"
 enabled = true
 command = "npm audit --json --omit=dev --audit-level=high"
 
-[intelligence]
-enabled = true
-
 [security]
 enabled = true
 fail_on_critical = true
@@ -172,8 +169,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 8. Multi-language support: Node.js, Python, Ruby, Go, Java, PHP, Rust, Static Sites, Shell Scripts, C/C++, Gleam, Elixir, Deno, and .NET.
 9. Multi-framework support: Next.js, Rails, Django, Flask, Spring (Maven/Gradle), Laravel, plus generic toolchain detection by language.
 10. Automatic artifact garbage collection: optional `[deploy.gc]` retention by count and age after each successful deploy.
-11. Smart Dependency Intelligence Buildpack: analyzes dependency trees, flags outdated packages, suggests lighter alternatives, prints optimization hints during build, and writes `dependency-intelligence-report.json`.
-12. Security-First Buildpack (enterprise): auto-generates SBOM (`sbom.json`), runs vulnerability scans during build, enforces critical-CVE build failure policy, auto-switches Dockerfile final base to distroless, and emits `security-report.json` plus `supply-chain-metadata.json`.
+11. Security-First Buildpack (enterprise): auto-generates SBOM (`sbom.json`), runs vulnerability scans during build, enforces critical-CVE build failure policy, auto-switches Dockerfile final base to distroless, and emits `security-report.json` plus `supply-chain-metadata.json`.
 
 ## Security scan failure details
 
@@ -191,7 +187,6 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 - Deploy artifacts are emitted under timestamped directories in `deploy.artifact_dir`.
 - With target `kubernetes`, `sendbuilds` writes `kubernetes/deployment.yaml` and `kubernetes/service.yaml` into the artifact root.
 - If `[deploy.gc].enabled = true`, old timestamped artifact directories are pruned automatically after deploy.
-- Dependency intelligence output is written to artifact root as `dependency-intelligence-report.json` and embedded in `build-metrics.json`.
 - Security-first output is written to artifact root as `sbom.json`, `security-report.json`, and `supply-chain-metadata.json`, and embedded in `build-metrics.json`.
 - If both `[security].enabled` and `[scan].enabled` are true, `security-first` runs and legacy `security-scan` is skipped to avoid duplicate scanning.
 - For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.

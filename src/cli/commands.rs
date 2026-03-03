@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::config::{
-    CacheConfig, DeployConfig, IntelligenceConfig, ProjectConfig, SandboxConfig, ScanConfig,
-    SecurityConfig, SigningConfig, SourceConfig,
+    CacheConfig, DeployConfig, ProjectConfig, SandboxConfig, ScanConfig, SecurityConfig,
+    SigningConfig, SourceConfig,
 };
 use crate::core::BuildConfig;
 use crate::engine::BuildEngine;
@@ -159,9 +159,6 @@ fn run_quick_build(
         scan: Some(ScanConfig {
             enabled: Some(false),
             command: None,
-        }),
-        intelligence: Some(IntelligenceConfig {
-            enabled: Some(true),
         }),
         security: Some(SecurityConfig {
             enabled: Some(true),

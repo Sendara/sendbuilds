@@ -123,7 +123,6 @@ fn friendly_step(name: &str) -> String {
         "incremental-prepare" => "Preparing incremental build data".to_string(),
         "install" => "Installing dependencies".to_string(),
         "security-first" => "Running security-first checks".to_string(),
-        "dependency-intelligence" => "Analyzing dependencies".to_string(),
         "security-scan" => "Running security scan".to_string(),
         "deps-cache-save" => "Saving dependency cache".to_string(),
         "build" => "Building project".to_string(),
