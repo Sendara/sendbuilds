@@ -8,7 +8,9 @@ pub fn clone(repo: &str, dest: &Path) -> Result<()> {
         .status()?
         .success();
 
-    if !ok { bail!("git clone failed: {repo}") }
+    if !ok {
+        bail!("git clone failed: {repo}")
+    }
     Ok(())
 }
 
@@ -19,7 +21,9 @@ pub fn checkout(dest: &Path, target: &str) -> Result<()> {
         .status()?
         .success();
 
-    if !ok { bail!("git checkout failed: {target}") }
+    if !ok {
+        bail!("git checkout failed: {target}")
+    }
     Ok(())
 }
 
@@ -30,6 +34,8 @@ pub fn fetch_and_checkout(dest: &Path, commit: &str) -> Result<()> {
         .status()?
         .success();
 
-    if !ok { bail!("git fetch failed") }
+    if !ok {
+        bail!("git fetch failed")
+    }
     checkout(dest, commit)
 }

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -13,8 +13,8 @@ use crate::languages;
 use crate::output::{events, logger as log};
 use crate::runtime::{artifacts, git, metrics, scan, shell};
 use crate::utils::cache::{
-    BuildCache, BuildState, changed_modules, compute_dependency_fingerprint,
-    compute_file_signatures, fingerprint_from_signatures,
+    changed_modules, compute_dependency_fingerprint, compute_file_signatures,
+    fingerprint_from_signatures, BuildCache, BuildState,
 };
 use crate::utils::signing;
 use crate::workers::parallel::{self, ParallelStepTask};
@@ -72,7 +72,14 @@ impl BuildEngine {
             None => log::kv("source", "local workspace"),
         }
         log::kv("workdir", &ctx.work_dir.display().to_string());
-        log::kv("sandbox", if sandbox_enabled { "enabled" } else { "disabled" });
+        log::kv(
+            "sandbox",
+            if sandbox_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+        );
 
         let mut steps: Vec<Step> = Vec::new();
         let mut cache_metrics = CacheMetrics::default();
@@ -97,9 +104,9 @@ impl BuildEngine {
 
         steps.push(self.execute_step(&ctx, "source", |_e, c, s| self.step_source(c, s))?);
         steps.push(self.execute_step(&ctx, "detect-build-config", |_e, c, s| {
-            resolved_language = self
-                .resolve_language(c)
-                .ok_or_else(|| anyhow!("unable to infer project language; set [project].language"))?;
+            resolved_language = self.resolve_language(c).ok_or_else(|| {
+                anyhow!("unable to infer project language; set [project].language")
+            })?;
             languages::validate(&resolved_language)?;
             s.push_log(format!("language={resolved_language}"));
             resolved = self.resolve_build(c, s)?;
@@ -111,26 +118,34 @@ impl BuildEngine {
         })?);
 
         if let Some(c) = &cache {
-            steps.push(self.execute_step(&ctx, "incremental-prepare", |_e, cctx, step| {
-                previous_state = c.load_state()?;
-                current_signatures = compute_file_signatures(&cctx.work_dir)?;
-                source_fingerprint = fingerprint_from_signatures(&current_signatures);
-                dependency_fingerprint = compute_dependency_fingerprint(&cctx.work_dir)?;
-                changed = changed_modules(previous_state.as_ref(), &current_signatures);
+            steps.push(
+                self.execute_step(&ctx, "incremental-prepare", |_e, cctx, step| {
+                    previous_state = c.load_state()?;
+                    current_signatures = compute_file_signatures(&cctx.work_dir)?;
+                    source_fingerprint = fingerprint_from_signatures(&current_signatures);
+                    dependency_fingerprint = compute_dependency_fingerprint(&cctx.work_dir)?;
+                    changed = changed_modules(previous_state.as_ref(), &current_signatures);
 
-                dep_cache_hit = previous_state
-                    .as_ref()
-                    .map(|p| p.dependency_fingerprint == dependency_fingerprint && c.has_dependency_cache())
-                    .unwrap_or(false);
-                dep_dir_cache_allowed = !cctx.work_dir.join("pnpm-lock.yaml").exists();
+                    dep_cache_hit = previous_state
+                        .as_ref()
+                        .map(|p| {
+                            p.dependency_fingerprint == dependency_fingerprint
+                                && c.has_dependency_cache()
+                        })
+                        .unwrap_or(false);
+                    dep_dir_cache_allowed = !cctx.work_dir.join("pnpm-lock.yaml").exists();
 
-                dep_install_cmd = self.optimize_install_cmd(&dep_install_cmd, &cctx.work_dir, dep_cache_hit);
-                step.push_log(format!("dependency_cache_hit={dep_cache_hit}"));
-                step.push_log(format!("dependency_dir_cache_allowed={dep_dir_cache_allowed}"));
-                step.push_log(format!("install_command={dep_install_cmd}"));
-                step.push_log(format!("changed_modules={}", changed.join(",")));
-                Ok(())
-            })?);
+                    dep_install_cmd =
+                        self.optimize_install_cmd(&dep_install_cmd, &cctx.work_dir, dep_cache_hit);
+                    step.push_log(format!("dependency_cache_hit={dep_cache_hit}"));
+                    step.push_log(format!(
+                        "dependency_dir_cache_allowed={dep_dir_cache_allowed}"
+                    ));
+                    step.push_log(format!("install_command={dep_install_cmd}"));
+                    step.push_log(format!("changed_modules={}", changed.join(",")));
+                    Ok(())
+                })?,
+            );
         }
 
         steps.push(self.execute_step(&ctx, "install", |_e, cctx, step| {
@@ -185,7 +200,10 @@ impl BuildEngine {
                     let saved = c.save_dependencies(&wd)?;
                     step.push_log(format!(
                         "deps cache save copied={} skipped={} removed={} bytes={}",
-                        saved.copied_files, saved.skipped_files, saved.removed_files, saved.copied_bytes
+                        saved.copied_files,
+                        saved.skipped_files,
+                        saved.removed_files,
+                        saved.copied_bytes
                     ));
                     Ok(())
                 }));
@@ -222,14 +240,22 @@ impl BuildEngine {
                     let command = cmd.clone();
                     let wd = cctx.work_dir.clone();
                     let env = cctx.env.clone();
-                    tasks.push(ParallelStepTask::new(format!("build-task-{}", idx + 1), move |_s| {
-                        let _ = shell::run(&command, &wd, &env, sandbox_enabled)?;
-                        Ok(())
-                    }));
+                    tasks.push(ParallelStepTask::new(
+                        format!("build-task-{}", idx + 1),
+                        move |_s| {
+                            let _ = shell::run(&command, &wd, &env, sandbox_enabled)?;
+                            Ok(())
+                        },
+                    ));
                 }
                 let _ = parallel::run(tasks)?;
             } else {
-                let run = shell::run(&resolved.build_cmd, &cctx.work_dir, &cctx.env, sandbox_enabled)?;
+                let run = shell::run(
+                    &resolved.build_cmd,
+                    &cctx.work_dir,
+                    &cctx.env,
+                    sandbox_enabled,
+                )?;
                 for line in run.logs {
                     step.push_log(line.clone());
                     log::pipe(&line);
@@ -240,7 +266,10 @@ impl BuildEngine {
                 let saved = c.save_artifact(&output_src)?;
                 step.push_log(format!(
                     "artifact cache save copied={} skipped={} removed={} bytes={}",
-                    saved.copied_files, saved.skipped_files, saved.removed_files, saved.copied_bytes
+                    saved.copied_files,
+                    saved.skipped_files,
+                    saved.removed_files,
+                    saved.copied_bytes
                 ));
             }
             step.push_log(format!("changed_modules={}", changed.join(",")));
@@ -252,35 +281,43 @@ impl BuildEngine {
             Ok(())
         })?);
 
-        steps.push(self.execute_step(&ctx, "sign-artifacts", |_e, _cctx, step| {
-            let enabled = cfg.signing.as_ref().and_then(|s| s.enabled).unwrap_or(false);
-            if !enabled {
-                step.push_log("signing disabled".to_string());
-                return Ok(());
-            }
-            let key_env = cfg
-                .signing
-                .as_ref()
-                .and_then(|s| s.key_env.clone())
-                .unwrap_or_else(|| "SENDBUILD_SIGNING_KEY".to_string());
-            if let Some(p) = &publish_result {
-                let (manifest, sig) = signing::sign_outputs(&p.root, &p.outputs, &key_env)?;
-                step.push_log(format!("manifest {}", manifest.display()));
-                step.push_log(format!("signature {}", sig.display()));
-            }
-            Ok(())
-        })?);
+        steps.push(
+            self.execute_step(&ctx, "sign-artifacts", |_e, _cctx, step| {
+                let enabled = cfg
+                    .signing
+                    .as_ref()
+                    .and_then(|s| s.enabled)
+                    .unwrap_or(false);
+                if !enabled {
+                    step.push_log("signing disabled".to_string());
+                    return Ok(());
+                }
+                let key_env = cfg
+                    .signing
+                    .as_ref()
+                    .and_then(|s| s.key_env.clone())
+                    .unwrap_or_else(|| "SENDBUILD_SIGNING_KEY".to_string());
+                if let Some(p) = &publish_result {
+                    let (manifest, sig) = signing::sign_outputs(&p.root, &p.outputs, &key_env)?;
+                    step.push_log(format!("manifest {}", manifest.display()));
+                    step.push_log(format!("signature {}", sig.display()));
+                }
+                Ok(())
+            })?,
+        );
 
         if let Some(c) = &cache {
-            steps.push(self.execute_step(&ctx, "cache-state-save", |_e, _cctx, step| {
-                c.save_state(&BuildState {
-                    source_fingerprint: source_fingerprint.clone(),
-                    dependency_fingerprint: dependency_fingerprint.clone(),
-                    file_signatures: current_signatures.clone(),
-                })?;
-                step.push_log("cache state saved");
-                Ok(())
-            })?);
+            steps.push(
+                self.execute_step(&ctx, "cache-state-save", |_e, _cctx, step| {
+                    c.save_state(&BuildState {
+                        source_fingerprint: source_fingerprint.clone(),
+                        dependency_fingerprint: dependency_fingerprint.clone(),
+                        file_signatures: current_signatures.clone(),
+                    })?;
+                    step.push_log("cache state saved");
+                    Ok(())
+                })?,
+            );
         }
 
         steps.push(self.execute_step(&ctx, "build-metrics", |_e, _cctx, step| {
@@ -342,12 +379,26 @@ impl BuildEngine {
         let build_cmd = cfg
             .and_then(|b| b.build_cmd.clone())
             .unwrap_or(self.infer_build_cmd(&ctx.work_dir)?);
-        let output_dir = cfg.and_then(|b| b.output_dir.clone()).or_else(|| self.infer_output_dir(&ctx.work_dir));
-        let parallel_build_cmds = cfg.and_then(|b| b.parallel_build_cmds.clone()).unwrap_or_default();
+        let output_dir = cfg
+            .and_then(|b| b.output_dir.clone())
+            .or_else(|| self.infer_output_dir(&ctx.work_dir));
+        let parallel_build_cmds = cfg
+            .and_then(|b| b.parallel_build_cmds.clone())
+            .unwrap_or_default();
         step.push_log(format!("install_cmd={install_cmd}"));
         step.push_log(format!("build_cmd={build_cmd}"));
-        step.push_log(format!("output_dir={}", output_dir.clone().unwrap_or_else(|| "<repo-root>".to_string())));
-        Ok(ResolvedBuild { install_cmd, build_cmd, output_dir, parallel_build_cmds })
+        step.push_log(format!(
+            "output_dir={}",
+            output_dir
+                .clone()
+                .unwrap_or_else(|| "<repo-root>".to_string())
+        ));
+        Ok(ResolvedBuild {
+            install_cmd,
+            build_cmd,
+            output_dir,
+            parallel_build_cmds,
+        })
     }
 
     fn step_compat(&self, ctx: &BuildContext, step: &mut Step) -> Result<()> {
@@ -369,7 +420,9 @@ impl BuildEngine {
                     let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if let Some(major) = parse_node_major(&v) {
                         if major != target_node_major {
-                            step.push_log(format!("warning target_node_major={target_node_major} current={major}"));
+                            step.push_log(format!(
+                                "warning target_node_major={target_node_major} current={major}"
+                            ));
                         }
                     }
                 }
@@ -379,7 +432,11 @@ impl BuildEngine {
         }
 
         if let Some(pkg) = read_package_json(&ctx.work_dir.join("package.json")) {
-            if let Some(engine) = pkg.get("engines").and_then(|e| e.get("node")).and_then(Value::as_str) {
+            if let Some(engine) = pkg
+                .get("engines")
+                .and_then(|e| e.get("node"))
+                .and_then(Value::as_str)
+            {
                 step.push_log(format!("package engines.node={engine}"));
             }
         }
@@ -387,7 +444,12 @@ impl BuildEngine {
     }
 
     fn configure_cache(&self, ctx: &BuildContext) -> Result<Option<BuildCache>> {
-        let enabled = self.config.cache.as_ref().and_then(|c| c.enabled).unwrap_or(true);
+        let enabled = self
+            .config
+            .cache
+            .as_ref()
+            .and_then(|c| c.enabled)
+            .unwrap_or(true);
         if !enabled {
             return Ok(None);
         }
@@ -402,7 +464,9 @@ impl BuildEngine {
     }
 
     fn output_src(&self, ctx: &BuildContext, output_dir: Option<&str>) -> PathBuf {
-        output_dir.map(|d| ctx.work_dir.join(d)).unwrap_or_else(|| ctx.work_dir.clone())
+        output_dir
+            .map(|d| ctx.work_dir.join(d))
+            .unwrap_or_else(|| ctx.work_dir.clone())
     }
 
     fn optimize_install_cmd(&self, raw: &str, work_dir: &Path, dep_cache_hit: bool) -> String {
@@ -421,7 +485,8 @@ impl BuildEngine {
             }
             return cmd;
         }
-        if raw.starts_with("yarn install") && has("yarn.lock") && !raw.contains("--frozen-lockfile") {
+        if raw.starts_with("yarn install") && has("yarn.lock") && !raw.contains("--frozen-lockfile")
+        {
             return format!("{raw} --frozen-lockfile");
         }
         if raw == "npm install" && has("package-lock.json") {
@@ -472,7 +537,12 @@ impl BuildEngine {
         }
         if let Some(pkg) = read_package_json(&work_dir.join("package.json")) {
             if has_next_dependency(&pkg) {
-                return nm.join("next").join("dist").join("bin").join("next").exists();
+                return nm
+                    .join("next")
+                    .join("dist")
+                    .join("bin")
+                    .join("next")
+                    .exists();
             }
         }
         true
@@ -585,7 +655,9 @@ impl BuildEngine {
         if wd.join("build.gradle").exists() || wd.join("build.gradle.kts").exists() {
             return Ok("./gradlew build -x test".to_string());
         }
-        if wd.join("artisan").exists() || file_contains(&wd.join("composer.json"), "laravel/framework") {
+        if wd.join("artisan").exists()
+            || file_contains(&wd.join("composer.json"), "laravel/framework")
+        {
             return Ok("php artisan config:cache && php artisan route:cache".to_string());
         }
         if wd.join("go.mod").exists() {
@@ -629,9 +701,14 @@ impl BuildEngine {
     }
 
     fn infer_output_dir(&self, wd: &Path) -> Option<String> {
-        if ["next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts"]
-            .iter()
-            .any(|f| wd.join(f).exists())
+        if [
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.cjs",
+            "next.config.ts",
+        ]
+        .iter()
+        .any(|f| wd.join(f).exists())
         {
             return Some(".next".to_string());
         }
@@ -650,7 +727,9 @@ impl BuildEngine {
         if wd.join("target").exists() && wd.join("pom.xml").exists() {
             return Some("target".to_string());
         }
-        if wd.join("build").exists() && (wd.join("build.gradle").exists() || wd.join("build.gradle.kts").exists()) {
+        if wd.join("build").exists()
+            && (wd.join("build.gradle").exists() || wd.join("build.gradle.kts").exists())
+        {
             return Some("build/libs".to_string());
         }
         if wd.join("bin").exists() && wd.join("go.mod").exists() {
@@ -742,19 +821,44 @@ impl BuildEngine {
         let published = artifacts::publish(
             &output_src,
             &ctx.artifact_dir,
+            &self.config.project.name,
             &targets,
             self.config.deploy.container_image.as_deref(),
+            self.config.deploy.kubernetes.as_ref(),
         )?;
         step.push_log(format!("artifact root {}", published.root.display()));
         for w in &published.warnings {
             step.push_log(format!("warning {w}"));
+        }
+        let gc = artifacts::garbage_collect_artifacts(
+            &ctx.artifact_dir,
+            &published.root,
+            self.config.deploy.gc.as_ref(),
+        )?;
+        if self
+            .config
+            .deploy
+            .gc
+            .as_ref()
+            .and_then(|g| g.enabled)
+            .unwrap_or(false)
+        {
+            step.push_log(format!(
+                "garbage collection removed={} kept={}",
+                gc.removed_dirs, gc.kept_dirs
+            ));
         }
         Ok(published)
     }
 }
 
 fn parse_node_major(v: &str) -> Option<u32> {
-    v.trim().trim_start_matches('v').split('.').next()?.parse().ok()
+    v.trim()
+        .trim_start_matches('v')
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn read_package_json(path: &Path) -> Option<Value> {
@@ -908,10 +1012,19 @@ fn has_glob_ext(root: &Path, ext: &str) -> bool {
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_file() {
-            if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(ext)).unwrap_or(false) {
+            if p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case(ext))
+                .unwrap_or(false)
+            {
                 return true;
             }
-            if ext == "csproj" && p.file_name().and_then(|n| n.to_str()).map(|n| n.ends_with(".csproj")).unwrap_or(false) {
+            if ext == "csproj"
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".csproj"))
+                    .unwrap_or(false)
+            {
                 return true;
             }
         }

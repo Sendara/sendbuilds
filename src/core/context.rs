@@ -1,15 +1,15 @@
-use std::path::PathBuf;
-use std::collections::HashMap;
 use chrono::{DateTime, Local};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 // everything a step might need to know about the current build
 #[derive(Debug)]
 pub struct BuildContext {
     pub project_name: String,
-    pub work_dir:     PathBuf,
+    pub work_dir: PathBuf,
     pub artifact_dir: PathBuf,
-    pub started_at:   DateTime<Local>,
-    pub env:          HashMap<String, String>,
+    pub started_at: DateTime<Local>,
+    pub env: HashMap<String, String>,
 }
 
 impl BuildContext {

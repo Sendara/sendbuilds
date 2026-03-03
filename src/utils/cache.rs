@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::{BTreeMap, BTreeSet, HashSet, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -96,7 +96,11 @@ impl BuildCache {
         fs::create_dir_all(self.state_path.parent().unwrap_or(&self.root))?;
         let mut file = fs::File::create(&self.state_path)?;
         writeln!(file, "source_fingerprint={}", state.source_fingerprint)?;
-        writeln!(file, "dependency_fingerprint={}", state.dependency_fingerprint)?;
+        writeln!(
+            file,
+            "dependency_fingerprint={}",
+            state.dependency_fingerprint
+        )?;
         for (path, sig) in &state.file_signatures {
             writeln!(file, "file\t{}\t{}", path, sig)?;
         }
@@ -203,7 +207,10 @@ pub fn compute_dependency_fingerprint(root: &Path) -> Result<String> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
-pub fn changed_modules(previous: Option<&BuildState>, current: &BTreeMap<String, u64>) -> Vec<String> {
+pub fn changed_modules(
+    previous: Option<&BuildState>,
+    current: &BTreeMap<String, u64>,
+) -> Vec<String> {
     let Some(prev) = previous else {
         return vec!["all".to_string()];
     };
@@ -233,7 +240,11 @@ fn module_name(path: &str) -> String {
     path.split('/').next().unwrap_or("unknown").to_string()
 }
 
-fn collect_file_signatures(root: &Path, cursor: &Path, out: &mut BTreeMap<String, u64>) -> Result<()> {
+fn collect_file_signatures(
+    root: &Path,
+    cursor: &Path,
+    out: &mut BTreeMap<String, u64>,
+) -> Result<()> {
     for entry in fs::read_dir(cursor).with_context(|| format!("cant read {}", cursor.display()))? {
         let entry = entry?;
         let path = entry.path();
@@ -265,7 +276,10 @@ fn collect_file_signatures(root: &Path, cursor: &Path, out: &mut BTreeMap<String
 }
 
 fn ignored_dir(name: &str) -> bool {
-    matches!(name, ".git" | "node_modules" | "target" | "artifacts" | ".next")
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "artifacts" | ".next"
+    )
 }
 
 fn hash_file(path: &Path) -> Result<u64> {

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -13,7 +13,12 @@ pub struct ShellRunOutput {
     pub exit_code: Option<i32>,
 }
 
-pub fn run(cmd: &str, cwd: &Path, env: &HashMap<String, String>, sandbox: bool) -> Result<ShellRunOutput> {
+pub fn run(
+    cmd: &str,
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    sandbox: bool,
+) -> Result<ShellRunOutput> {
     let output = run_allow_failure(cmd, cwd, env, sandbox)?;
     if !output.success {
         bail!("command failed [{:.1}s]: {cmd}", output.duration_secs);

@@ -1,8 +1,8 @@
 mod node;
 
-use anyhow::{Result, bail};
-use std::process::Command;
 use crate::errors::BuildError;
+use anyhow::{bail, Result};
+use std::process::Command;
 
 pub fn validate(language: &str) -> Result<()> {
     match normalize_language(language).as_str() {
@@ -13,8 +13,11 @@ pub fn validate(language: &str) -> Result<()> {
         "go" => check_runtime("go", &["version"]),
         "java" => check_runtime("java", &["-version"]),
         "php" => check_runtime("php", &["--version"]),
-        "rust" => check_runtime("cargo", &["--version"]).or_else(|_| check_runtime("rustc", &["--version"])),
-        "shell" => check_runtime("sh", &["--version"]).or_else(|_| check_runtime("bash", &["--version"])),
+        "rust" => check_runtime("cargo", &["--version"])
+            .or_else(|_| check_runtime("rustc", &["--version"])),
+        "shell" => {
+            check_runtime("sh", &["--version"]).or_else(|_| check_runtime("bash", &["--version"]))
+        }
         "c_cpp" => check_runtime("gcc", &["--version"])
             .or_else(|_| check_runtime("clang", &["--version"]))
             .or_else(|_| check_runtime("cl", &[])),

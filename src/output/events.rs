@@ -11,12 +11,19 @@ pub fn step_completed(step: &Step) {
 }
 
 pub fn step_failed(step: &Step, error: &str) {
-    emit("STEP_FAILED", step, StepStatus::Failed.as_str(), Some(error));
+    emit(
+        "STEP_FAILED",
+        step,
+        StepStatus::Failed.as_str(),
+        Some(error),
+    );
 }
 
 fn emit(event_type: &str, step: &Step, status: &str, error: Option<&str>) {
     let ts = Local::now().to_rfc3339();
-    let duration_ms = step.duration_secs.map(|secs| (secs * 1000.0).round() as u64);
+    let duration_ms = step
+        .duration_secs
+        .map(|secs| (secs * 1000.0).round() as u64);
 
     let mut fields = vec![
         format!("\"type\":\"{}\"", esc(event_type)),

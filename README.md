@@ -85,8 +85,21 @@ output_dir = ".next"                                             # optional over
 
 [deploy]
 artifact_dir = "./artifacts"
-targets = ["directory", "tarball", "serverless_zip", "container_image"] # optional
+targets = ["directory", "tarball", "serverless_zip", "container_image", "kubernetes"] # optional
 container_image = "my-app:latest"                                       # optional
+
+[deploy.kubernetes] # optional (used by target="kubernetes")
+enabled = true
+namespace = "default"
+replicas = 2
+container_port = 3000
+service_port = 80
+image_pull_policy = "IfNotPresent"
+
+[deploy.gc] # optional automatic artifact garbage collection
+enabled = true
+keep_last = 5
+max_age_days = 14
 
 [cache]
 enabled = true
@@ -132,10 +145,11 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 3. Sandboxing controls: optional sandbox mode (`[sandbox].enabled`) with basic command blocking and restricted env baseline.
 4. Signed artifacts: optional HMAC-SHA256 manifest signing with `artifact-manifest.json` and `artifact-manifest.sig`.
 5. Environment variable injection: explicit `[env]` values and `env_from_host` passthrough.
-6. Multiple output targets: `directory`, `static_site`, `tarball`, `serverless_zip` / `serverless_function`, and `container_image`.
+6. Multiple output targets: `directory`, `static_site`, `tarball`, `serverless_zip` / `serverless_function`, `container_image`, and `kubernetes` (Kubernetes manifests).
 7. Compatibility checks: optional warnings for target OS/arch/node-major mismatches, including `engines.node` checks when available.
 8. Multi-language support: Node.js, Python, Ruby, Go, Java, PHP, Rust, Static Sites, Shell Scripts, C/C++, Gleam, Elixir, Deno, and .NET.
 9. Multi-framework support: Next.js, Rails, Django, Flask, Spring (Maven/Gradle), Laravel, plus generic toolchain detection by language.
+10. Automatic artifact garbage collection: optional `[deploy.gc]` retention by count and age after each successful deploy.
 
 ## Security scan failure details
 
@@ -151,6 +165,8 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 
 - Builds run in temporary work directories under system temp.
 - Deploy artifacts are emitted under timestamped directories in `deploy.artifact_dir`.
+- With target `kubernetes`, `sendbuilds` writes `kubernetes/deployment.yaml` and `kubernetes/service.yaml` into the artifact root.
+- If `[deploy.gc].enabled = true`, old timestamped artifact directories are pruned automatically after deploy.
 - For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.
 
 ## Contributing

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,9 +23,24 @@ pub fn run(
         "ruby" => shell::run("bundle audit check --update", work_dir, env, sandbox),
         "go" => shell::run("govulncheck ./...", work_dir, env, sandbox),
         "rust" => shell::run("cargo audit", work_dir, env, sandbox),
-        "java" => shell::run("echo security scan skipped: configure scanner for java", work_dir, env, sandbox),
-        "php" => shell::run("echo security scan skipped: configure scanner for php", work_dir, env, sandbox),
-        _ => shell::run("echo security scan skipped (no scanner configured)", work_dir, env, sandbox),
+        "java" => shell::run(
+            "echo security scan skipped: configure scanner for java",
+            work_dir,
+            env,
+            sandbox,
+        ),
+        "php" => shell::run(
+            "echo security scan skipped: configure scanner for php",
+            work_dir,
+            env,
+            sandbox,
+        ),
+        _ => shell::run(
+            "echo security scan skipped (no scanner configured)",
+            work_dir,
+            env,
+            sandbox,
+        ),
     }
 }
 
@@ -33,7 +48,11 @@ pub fn enabled(config: Option<&ScanConfig>) -> bool {
     config.and_then(|c| c.enabled).unwrap_or(true)
 }
 
-fn run_node_scan(work_dir: &Path, env: &HashMap<String, String>, sandbox: bool) -> Result<ShellRunOutput> {
+fn run_node_scan(
+    work_dir: &Path,
+    env: &HashMap<String, String>,
+    sandbox: bool,
+) -> Result<ShellRunOutput> {
     let cmd = "npm audit --json --omit=dev --audit-level=high";
     let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
     if run.success {
@@ -59,7 +78,9 @@ fn run_node_scan(work_dir: &Path, env: &HashMap<String, String>, sandbox: bool) 
 
 fn parse_npm_audit_summary(logs: &[String]) -> String {
     let json_raw = collect_json(logs);
-    let Some(raw) = json_raw else { return String::new(); };
+    let Some(raw) = json_raw else {
+        return String::new();
+    };
     let parsed: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(_) => return String::new(),
@@ -91,11 +112,7 @@ fn parse_npm_audit_summary(logs: &[String]) -> String {
     }
 
     let actions = "suggestions: 1) npm audit fix 2) update vulnerable packages/lockfile 3) if blocked, pin safe versions and rebuild cache";
-    format!(
-        "vulnerable packages: {}. {}",
-        packages.join(", "),
-        actions
-    )
+    format!("vulnerable packages: {}. {}", packages.join(", "), actions)
 }
 
 fn collect_json(logs: &[String]) -> Option<String> {

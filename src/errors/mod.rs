@@ -10,7 +10,6 @@ pub enum BuildError {
 
     #[error("output directory missing: {0}")]
     MissingOutput(String),
-
     // phase 2+
     // #[error("cache error: {0}")]
     // CacheFailure(String),

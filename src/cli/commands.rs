@@ -106,7 +106,20 @@ output_dir = ".next"
 
 [deploy]
 artifact_dir = "./artifacts"
-targets = ["static_site", "tarball"]
+targets = ["static_site", "tarball", "kubernetes"]
+container_image = "{project_name}:latest"
+
+[deploy.kubernetes]
+enabled = true
+namespace = "default"
+replicas = 2
+container_port = 3000
+service_port = 80
+
+[deploy.gc]
+enabled = true
+keep_last = 5
+max_age_days = 14
 "#
         ),
         "rails" => format!(
@@ -120,7 +133,20 @@ branch = "main"
 
 [deploy]
 artifact_dir = "./artifacts"
-targets = ["tarball", "container_image"]
+targets = ["tarball", "container_image", "kubernetes"]
+container_image = "{project_name}:latest"
+
+[deploy.kubernetes]
+enabled = true
+namespace = "default"
+replicas = 2
+container_port = 3000
+service_port = 80
+
+[deploy.gc]
+enabled = true
+keep_last = 5
+max_age_days = 14
 "#
         ),
         "django" => format!(
@@ -137,7 +163,20 @@ output_dir = "staticfiles"
 
 [deploy]
 artifact_dir = "./artifacts"
-targets = ["static_site", "serverless_function"]
+targets = ["static_site", "serverless_function", "kubernetes"]
+container_image = "{project_name}:latest"
+
+[deploy.kubernetes]
+enabled = true
+namespace = "default"
+replicas = 2
+container_port = 8000
+service_port = 80
+
+[deploy.gc]
+enabled = true
+keep_last = 5
+max_age_days = 14
 "#
         ),
         _ => format!(
@@ -151,6 +190,20 @@ branch = "main"
 
 [deploy]
 artifact_dir = "./artifacts"
+targets = ["directory", "kubernetes"]
+container_image = "{project_name}:latest"
+
+[deploy.kubernetes]
+enabled = true
+namespace = "default"
+replicas = 1
+container_port = 8080
+service_port = 80
+
+[deploy.gc]
+enabled = true
+keep_last = 5
+max_age_days = 14
 "#
         ),
     };
@@ -187,10 +240,17 @@ fn run_cache(cmd: CacheCmd, config_path: &str) -> Result<()> {
         }
         CacheCmd::Status => {
             println!("Cache root: {}", project_cache.display());
-            println!("deps: {}", if deps.exists() { "present" } else { "missing" });
+            println!(
+                "deps: {}",
+                if deps.exists() { "present" } else { "missing" }
+            );
             println!(
                 "artifact: {}",
-                if artifact.exists() { "present" } else { "missing" }
+                if artifact.exists() {
+                    "present"
+                } else {
+                    "missing"
+                }
             );
             println!(
                 "state: {}",

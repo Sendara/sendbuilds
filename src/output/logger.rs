@@ -32,7 +32,12 @@ pub fn ok(msg: &str) {
 }
 
 pub fn fail(msg: &str) {
-    eprintln!("{} {} {}", ts().dimmed(), "x".red().bold(), msg.red().bold());
+    eprintln!(
+        "{} {} {}",
+        ts().dimmed(),
+        "x".red().bold(),
+        msg.red().bold()
+    );
 }
 
 pub fn step_started(name: &str) {
@@ -54,9 +59,15 @@ pub fn steps_summary(steps: &[Step]) {
     section("step summary");
     for step_data in steps {
         let duration = step_data.duration_secs.unwrap_or_default();
-        let resources = step_data.resources.map(|r| {
-            format!(" cpu={:.1}% mem={}MB disk={}MB", r.cpu_percent, r.memory_mb, r.disk_mb)
-        }).unwrap_or_default();
+        let resources = step_data
+            .resources
+            .map(|r| {
+                format!(
+                    " cpu={:.1}% mem={}MB disk={}MB",
+                    r.cpu_percent, r.memory_mb, r.disk_mb
+                )
+            })
+            .unwrap_or_default();
         println!(
             "  {:12} {:10} {:>6.1}s  logs={}{}",
             format!("{}:", step_data.name).dimmed(),

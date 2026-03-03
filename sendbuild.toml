@@ -16,8 +16,21 @@ name     = "test"
 
 [deploy]
 artifact_dir = "./artifacts"
-# targets = ["static_site", "tarball", "serverless_function", "container_image"]
+# targets = ["static_site", "tarball", "serverless_function", "container_image", "kubernetes"]
 # container_image = "sendara-landing:latest"
+
+# [deploy.kubernetes]
+# enabled = true
+# namespace = "default"
+# replicas = 2
+# container_port = 3000
+# service_port = 80
+# image_pull_policy = "IfNotPresent"
+
+# [deploy.gc]
+# enabled = true
+# keep_last = 5
+# max_age_days = 14
 
 [cache]
 enabled = true

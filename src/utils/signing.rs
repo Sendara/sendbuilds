@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,8 +19,13 @@ pub struct SignedEntry {
     pub sha256: String,
 }
 
-pub fn sign_outputs(output_root: &Path, outputs: &[PathBuf], key_env: &str) -> Result<(PathBuf, PathBuf)> {
-    let key = std::env::var(key_env).with_context(|| format!("missing signing key env: {key_env}"))?;
+pub fn sign_outputs(
+    output_root: &Path,
+    outputs: &[PathBuf],
+    key_env: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    let key =
+        std::env::var(key_env).with_context(|| format!("missing signing key env: {key_env}"))?;
     if key.trim().is_empty() {
         bail!("signing key env is empty: {key_env}");
     }
