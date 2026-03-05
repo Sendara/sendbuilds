@@ -123,6 +123,7 @@ command = "npm audit --json --omit=dev --audit-level=high"
 enabled = true
 fail_on_critical = true
 critical_threshold = 0
+fail_on_scanner_unavailable = true
 generate_sbom = true
 auto_distroless = true
 # distroless_base = "gcr.io/distroless/nodejs20-debian12"
@@ -170,6 +171,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 9. Multi-framework support: Next.js, Rails, Django, Flask, Spring (Maven/Gradle), Laravel, plus generic toolchain detection by language.
 10. Automatic artifact garbage collection: optional `[deploy.gc]` retention by count and age after each successful deploy.
 11. Security-First Buildpack (enterprise): auto-generates SBOM (`sbom.json`), runs vulnerability scans during build, enforces critical-CVE build failure policy, auto-switches Dockerfile final base to distroless, and emits `security-report.json` plus `supply-chain-metadata.json`.
+12. CNB lifecycle parity metadata: exports `cnb/lifecycle-contract.json` and `cnb/lifecycle-metadata.json` with standardized detect/analyze/restore/build/export phase mapping.
 
 ## Security scan failure details
 
@@ -188,6 +190,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 - With target `kubernetes`, `sendbuilds` writes `kubernetes/deployment.yaml` and `kubernetes/service.yaml` into the artifact root.
 - If `[deploy.gc].enabled = true`, old timestamped artifact directories are pruned automatically after deploy.
 - Security-first output is written to artifact root as `sbom.json`, `security-report.json`, and `supply-chain-metadata.json`, and embedded in `build-metrics.json`.
+- CNB lifecycle parity output is written to artifact root under `cnb/lifecycle-contract.json` and `cnb/lifecycle-metadata.json`.
 - If both `[security].enabled` and `[scan].enabled` are true, `security-first` runs and legacy `security-scan` is skipped to avoid duplicate scanning.
 - For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.
 

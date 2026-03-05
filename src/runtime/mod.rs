@@ -1,4 +1,5 @@
 pub mod artifacts;
+pub mod cnb;
 pub mod git;
 pub mod metrics;
 pub mod scan;

@@ -130,6 +130,7 @@ fn friendly_step(name: &str) -> String {
         "sign-artifacts" => "Signing artifacts".to_string(),
         "cache-state-save" => "Saving cache state".to_string(),
         "build-metrics" => "Writing build metrics".to_string(),
+        "cnb-lifecycle" => "Writing CNB lifecycle metadata".to_string(),
         _ => format!("Running {name}"),
     }
 }

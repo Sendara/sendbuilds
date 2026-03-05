@@ -11,7 +11,7 @@ use crate::core::{BuildConfig, BuildContext, Step, StepStatus};
 use crate::errors::BuildError;
 use crate::languages;
 use crate::output::{events, logger as log};
-use crate::runtime::{artifacts, git, metrics, scan, security, shell};
+use crate::runtime::{artifacts, cnb, git, metrics, scan, security, shell};
 use crate::utils::cache::{
     changed_modules, compute_dependency_fingerprint, compute_file_signatures,
     fingerprint_from_signatures, BuildCache, BuildState,
@@ -414,6 +414,36 @@ impl BuildEngine {
             let out = root.join("build-metrics.json");
             fs::write(&out, serde_json::to_vec_pretty(&report)?)?;
             step.push_log(format!("metrics {}", out.display()));
+            Ok(())
+        })?);
+
+        steps.push(self.execute_step(&ctx, "cnb-lifecycle", |_e, _cctx, step| {
+            let root = publish_result
+                .as_ref()
+                .map(|p| p.root.clone())
+                .unwrap_or_else(|| ctx.artifact_dir.clone());
+            fs::create_dir_all(&root)?;
+            let contract = cnb::write_lifecycle_contract(&root)?;
+            let metadata = cnb::write_lifecycle_metadata(
+                &root,
+                &cfg.project.name,
+                ctx.started_at,
+                &steps,
+                publish_result
+                    .as_ref()
+                    .map(|p| p.outputs.as_slice())
+                    .unwrap_or(&[]),
+                publish_result
+                    .as_ref()
+                    .map(|p| p.warnings.as_slice())
+                    .unwrap_or(&[]),
+            )?;
+            step.push_log(format!("cnb contract {}", contract.display()));
+            step.push_log(format!("cnb metadata {}", metadata.display()));
+            if let Some(p) = &mut publish_result {
+                p.outputs.push(contract);
+                p.outputs.push(metadata);
+            }
             Ok(())
         })?);
 
