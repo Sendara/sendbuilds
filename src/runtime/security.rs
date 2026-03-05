@@ -169,6 +169,12 @@ pub fn run(
             format_policy_violation_with_findings(&report.vulnerability_scan, critical_threshold)
         );
     }
+    if report.vulnerability_scan.high > 0 || report.vulnerability_scan.moderate > 0 {
+        bail!(
+            "{}",
+            format_policy_violation_disallow_high_moderate(&report.vulnerability_scan)
+        );
+    }
 
     Ok(SecurityRunOutput {
         report,
@@ -209,12 +215,36 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
             report.vulnerability_scan.suggestions.join(" | ")
         ));
     }
-    for detail in report.vulnerability_scan.detailed_findings.iter().take(3) {
-        lines.push(format!("security finding {}", detail.replace('\n', " | ")));
+    for (idx, detail) in report
+        .vulnerability_scan
+        .detailed_findings
+        .iter()
+        .take(3)
+        .enumerate()
+    {
+        lines.push(format!("security finding #{}:", idx + 1));
+        for part in detail.lines() {
+            lines.push(format!("  {part}"));
+        }
     }
+    let policy_result = if report.vulnerability_scan.critical > report.critical_threshold
+        || report.vulnerability_scan.high > 0
+        || report.vulnerability_scan.moderate > 0
+    {
+        "failed"
+    } else if report.fail_on_critical {
+        "passed"
+    } else {
+        "disabled"
+    };
     lines.push(format!(
-        "security policy fail_on_critical={} critical_threshold={}",
-        report.fail_on_critical, report.critical_threshold
+        "security policy result={} fail_on_critical={} critical_threshold={} observed_critical={} observed_high={} observed_moderate={}",
+        policy_result,
+        report.fail_on_critical,
+        report.critical_threshold,
+        report.vulnerability_scan.critical,
+        report.vulnerability_scan.high,
+        report.vulnerability_scan.moderate
     ));
     if report.sbom_generated {
         lines.push(format!(
@@ -945,6 +975,27 @@ fn format_policy_violation_with_findings(
     let mut msg = format!(
         "security policy violation: critical vulnerabilities {} exceed threshold {}.",
         summary.critical, critical_threshold
+    );
+    if !summary.detailed_findings.is_empty() {
+        msg.push_str(&format!(
+            "\n\nFound {} vulnerable package(s):\n\n",
+            summary.detailed_findings.len()
+        ));
+        for finding in summary.detailed_findings.iter().take(6) {
+            msg.push_str(finding);
+            msg.push('\n');
+            msg.push('\n');
+        }
+    } else if !summary.packages.is_empty() {
+        msg.push_str(&format!("\n\nPackages: {}", summary.packages.join(", ")));
+    }
+    msg.trim_end().to_string()
+}
+
+fn format_policy_violation_disallow_high_moderate(summary: &VulnerabilitySummary) -> String {
+    let mut msg = format!(
+        "security policy violation: HIGH/MODERATE vulnerabilities are not allowed. observed_high={} observed_moderate={}.",
+        summary.high, summary.moderate
     );
     if !summary.detailed_findings.is_empty() {
         msg.push_str(&format!(

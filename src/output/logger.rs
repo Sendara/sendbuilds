@@ -27,16 +27,38 @@ fn emit(level: &str, msg: &str) {
     println!("[{}] {} | {}", ts().dimmed(), styled_level, msg);
 }
 
+fn emit_security(level: &str, msg: &str) {
+    let level_padded = format!("{level:<7}");
+    let styled_level = match level {
+        "ALERT" => level_padded.red().bold(),
+        "WARN" => level_padded.yellow().bold(),
+        _ => level_padded.cyan().bold(),
+    };
+    println!(
+        "[{}] | SECURITY | {} | {}",
+        ts().dimmed(),
+        styled_level,
+        msg
+    );
+}
+
 fn classify_line(line: &str) -> &'static str {
     let lower = line.trim().to_lowercase();
-    if lower.starts_with("warn") || lower.contains(" warning") || lower.contains("deprecated") {
-        "WARN"
-    } else if lower.starts_with("error")
+    if lower.contains("severity: critical")
+        || lower.contains(" security policy violation")
+        || lower.starts_with("error")
         || lower.starts_with("fatal")
         || lower.contains(" failed")
         || lower.contains(" failure")
     {
         "ERROR"
+    } else if lower.contains("severity: high")
+        || lower.starts_with("warn")
+        || lower.contains(" warning")
+        || lower.contains("deprecated")
+        || lower.contains("vulnerable")
+    {
+        "WARN"
     } else {
         "INFO"
     }
@@ -53,7 +75,39 @@ pub fn section(msg: &str) {
 }
 
 pub fn pipe(line: &str) {
-    emit(classify_line(line), line.trim());
+    for segment in line.lines() {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        emit(classify_line(trimmed), trimmed);
+    }
+}
+
+pub fn security(line: &str) {
+    for segment in line.lines() {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        let level = if lower.contains("severity: critical")
+            || lower.contains("severity: high")
+            || lower.contains("severity: moderate")
+            || lower.contains("security policy result=failed")
+            || lower.contains("security policy violation")
+        {
+            "ALERT"
+        } else if lower.contains("vulnerabilities:")
+            || lower.starts_with("- ")
+            || lower.contains("security finding")
+        {
+            "WARN"
+        } else {
+            "INFO"
+        };
+        emit_security(level, trimmed);
+    }
 }
 
 pub fn kv(key: &str, val: &str) {

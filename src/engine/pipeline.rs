@@ -268,7 +268,7 @@ impl BuildEngine {
                 )?;
                 for line in security::to_build_logs(&out.report) {
                     step.push_log(line.clone());
-                    log::pipe(&line);
+                    log::security(&line);
                 }
                 security_sbom = Some(out.sbom);
                 supply_chain_metadata = Some(out.supply_chain_metadata);
@@ -503,6 +503,19 @@ impl BuildEngine {
                         "security policy violation: container scan critical vulnerabilities {} exceed threshold {}. packages={}",
                         summary.critical,
                         critical_threshold,
+                        package_hint
+                    );
+                }
+                if summary.high > 0 || summary.moderate > 0 {
+                    let package_hint = if summary.packages.is_empty() {
+                        "none".to_string()
+                    } else {
+                        summary.packages.iter().take(12).cloned().collect::<Vec<_>>().join(", ")
+                    };
+                    bail!(
+                        "security policy violation: container scan HIGH/MODERATE vulnerabilities are not allowed. observed_high={} observed_moderate={}. packages={}",
+                        summary.high,
+                        summary.moderate,
                         package_hint
                     );
                 }
