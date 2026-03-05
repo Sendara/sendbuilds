@@ -10,6 +10,7 @@ pub struct BuildConfig {
     pub source: Option<SourceConfig>,
     pub build: Option<BuildStepConfig>,
     pub deploy: DeployConfig,
+    pub output: Option<OutputConfig>,
     pub cache: Option<CacheConfig>,
     pub scan: Option<ScanConfig>,
     pub security: Option<SecurityConfig>,
@@ -18,6 +19,11 @@ pub struct BuildConfig {
     pub sandbox: Option<SandboxConfig>,
     pub signing: Option<SigningConfig>,
     pub compatibility: Option<CompatibilityConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OutputConfig {
+    pub events: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +155,7 @@ impl BuildConfig {
                 kubernetes: None,
                 gc: None,
             },
+            output: None,
             cache: None,
             scan: None,
             security: None,

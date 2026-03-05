@@ -1,6 +1,13 @@
 use chrono::Local;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::core::{Step, StepStatus};
+
+static EVENTS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_enabled(enabled: bool) {
+    EVENTS_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 pub fn step_started(step: &Step) {
     emit("STEP_STARTED", step, StepStatus::Running.as_str(), None);
@@ -20,6 +27,10 @@ pub fn step_failed(step: &Step, error: &str) {
 }
 
 fn emit(event_type: &str, step: &Step, status: &str, error: Option<&str>) {
+    if !EVENTS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
     let ts = Local::now().to_rfc3339();
     let duration_ms = step
         .duration_secs

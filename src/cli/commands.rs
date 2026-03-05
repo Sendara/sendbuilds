@@ -154,6 +154,7 @@ fn run_quick_build(
             kubernetes: None,
             gc: None,
         },
+        output: None,
         cache: Some(CacheConfig {
             enabled: Some(true),
             dir: None,

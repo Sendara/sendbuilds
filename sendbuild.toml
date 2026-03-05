@@ -35,6 +35,10 @@ artifact_dir = "./artifacts"
 # keep_last = 5
 # max_age_days = 14
 
+[output]
+# set false to hide all machine-readable EVENT lines
+events = true
+
 [cache]
 enabled = true
 dir = "./artifacts/.sendbuild-cache"

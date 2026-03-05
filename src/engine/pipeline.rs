@@ -68,6 +68,8 @@ impl BuildEngine {
 
     pub fn run(self) -> Result<()> {
         let cfg = &self.config;
+        let events_enabled = cfg.output.as_ref().and_then(|o| o.events).unwrap_or(true);
+        events::set_enabled(events_enabled);
 
         let env_map = self.resolve_env();
         let sandbox_enabled = cfg.sandbox.as_ref().and_then(|s| s.enabled).unwrap_or(true);

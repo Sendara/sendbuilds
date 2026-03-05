@@ -114,6 +114,9 @@ enabled = true
 keep_last = 5
 max_age_days = 14
 
+[output]
+events = true # set false to hide EVENT {...} lines
+
 [cache]
 enabled = true
 dir = "./artifacts/.sendbuild-cache"
