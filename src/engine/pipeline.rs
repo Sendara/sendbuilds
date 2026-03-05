@@ -83,6 +83,8 @@ impl BuildEngine {
 
         let env_map = self.resolve_env();
         let sandbox_enabled = cfg.sandbox.as_ref().and_then(|s| s.enabled).unwrap_or(true);
+        let sandbox_strict = cfg.sandbox.as_ref().and_then(|s| s.strict).unwrap_or(false);
+        shell::set_sandbox_strict(sandbox_enabled && sandbox_strict);
         let work_dir = if self.in_place && cfg.source.is_none() {
             std::env::current_dir()?
         } else {
@@ -116,7 +118,11 @@ impl BuildEngine {
         log::kv(
             "sandbox",
             if sandbox_enabled {
-                "enabled"
+                if sandbox_strict {
+                    "enabled (strict)"
+                } else {
+                    "enabled"
+                }
             } else {
                 "disabled"
             },
@@ -372,6 +378,63 @@ impl BuildEngine {
             publish_result = Some(self.step_deploy(cctx, step, resolved.output_dir.as_deref())?);
             Ok(())
         })?);
+
+        let should_scan_container_image = security_enabled
+            && target_includes_container(cfg.deploy.targets.as_ref())
+            && cfg.deploy.container_image.is_some();
+        if should_scan_container_image {
+            let image = cfg.deploy.container_image.clone().unwrap_or_default();
+            let security_cfg = cfg.security.clone();
+            steps.push(self.execute_step(&ctx, "container-security-scan", |_e, cctx, step| {
+                let summary = security::run_container_image_scan(
+                    &image,
+                    security_cfg.as_ref(),
+                    &cctx.env,
+                    sandbox_enabled,
+                )?;
+                step.push_log(format!(
+                    "scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={}",
+                    summary.scanner,
+                    summary.scanned,
+                    summary.total,
+                    summary.critical,
+                    summary.high,
+                    summary.moderate,
+                    summary.low,
+                    summary.info
+                ));
+                if let Some(reason) = &summary.unavailable_reason {
+                    step.push_log(format!("unavailable_reason={reason}"));
+                }
+                if !summary.packages.is_empty() {
+                    step.push_log(format!("packages={}", summary.packages.join(",")));
+                }
+                if !summary.suggestions.is_empty() {
+                    step.push_log(format!("suggestions={}", summary.suggestions.join(" | ")));
+                }
+
+                if let Some(report) = security_report.as_mut() {
+                    report.container_scan = Some(summary.clone());
+                }
+
+                let fail_on_critical = security_cfg
+                    .as_ref()
+                    .and_then(|c| c.fail_on_critical)
+                    .unwrap_or(true);
+                let critical_threshold = security_cfg
+                    .as_ref()
+                    .and_then(|c| c.critical_threshold)
+                    .unwrap_or(0);
+                if fail_on_critical && summary.critical > critical_threshold {
+                    bail!(
+                        "security policy violation: container image critical vulnerabilities {} exceed threshold {}",
+                        summary.critical,
+                        critical_threshold
+                    );
+                }
+                Ok(())
+            })?);
+        }
 
         steps.push(
             self.execute_step(&ctx, "sign-artifacts", |_e, _cctx, step| {
@@ -1120,6 +1183,18 @@ impl BuildEngine {
         }
         Ok(published)
     }
+}
+
+fn target_includes_container(targets: Option<&Vec<String>>) -> bool {
+    let selected = targets
+        .cloned()
+        .unwrap_or_else(|| vec!["directory".to_string()]);
+    selected.iter().any(|t| {
+        matches!(
+            t.as_str(),
+            "container" | "container_image"
+        )
+    })
 }
 
 fn log_build_overview(steps: &[Step], total_secs: f32, cache_metrics: &CacheMetrics) {

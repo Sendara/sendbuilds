@@ -104,6 +104,7 @@ pub struct SecurityConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct SandboxConfig {
     pub enabled: Option<bool>,
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

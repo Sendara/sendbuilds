@@ -190,6 +190,7 @@ fn run_quick_build(
         env_from_host: None,
         sandbox: Some(SandboxConfig {
             enabled: Some(true),
+            strict: Some(true),
         }),
         signing: Some(SigningConfig {
             enabled: Some(true),

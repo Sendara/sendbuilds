@@ -22,6 +22,7 @@ pub struct SecurityReport {
     pub fail_on_critical: bool,
     pub critical_threshold: u32,
     pub distroless: DistrolessSwitchResult,
+    pub container_scan: Option<VulnerabilitySummary>,
     pub notes: Vec<String>,
 }
 
@@ -230,10 +231,99 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
                 .unwrap_or_else(|| "n/a".to_string())
         ));
     }
+    if let Some(container) = &report.container_scan {
+        lines.push(format!(
+            "container scan scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} unavailable_reason={}",
+            container.scanner,
+            container.scanned,
+            container.total,
+            container.critical,
+            container.high,
+            container.moderate,
+            container.low,
+            container.info,
+            container
+                .unavailable_reason
+                .clone()
+                .unwrap_or_else(|| "none".to_string())
+        ));
+    }
     for note in &report.notes {
         lines.push(format!("note {note}"));
     }
     lines
+}
+
+pub fn run_container_image_scan(
+    image: &str,
+    config: Option<&SecurityConfig>,
+    env: &HashMap<String, String>,
+    sandbox: bool,
+) -> Result<VulnerabilitySummary> {
+    let fail_on_scanner_unavailable = config
+        .and_then(|c| c.fail_on_scanner_unavailable)
+        .unwrap_or(true);
+    let candidates = [
+        (
+            "trivy-image",
+            format!("trivy image --quiet --format json {image}"),
+            ScanParser::GenericJson,
+        ),
+        ("grype-image", format!("grype {image} -o json"), ScanParser::GenericJson),
+    ];
+
+    let mut attempts = Vec::new();
+    for (scanner, command, parser) in candidates.iter() {
+        attempts.push(format!("{scanner}:{command}"));
+        let run = shell::run_allow_failure(command, Path::new("."), env, sandbox)?;
+        if command_not_found_in_logs(&run.logs) {
+            continue;
+        }
+        let mut summary = VulnerabilitySummary {
+            scanner: (*scanner).to_string(),
+            scanned: true,
+            command: command.clone(),
+            scanner_attempts: attempts.clone(),
+            suggestions: vec![
+                "Install trivy or grype for container vulnerability scanning".to_string(),
+                "Pin a patched base image digest and rebuild".to_string(),
+                "Apply remediation updates and republish image".to_string(),
+            ],
+            ..Default::default()
+        };
+        parse_scan_output(*parser, &run.logs, &mut summary);
+        if summary.packages.is_empty() {
+            summary.packages = extract_package_names(&run.logs);
+        }
+        if summary.total == 0 && !summary.packages.is_empty() {
+            summary.total = summary.packages.len() as u32;
+        }
+        return Ok(summary);
+    }
+
+    if fail_on_scanner_unavailable {
+        bail!(
+            "security policy violation: required container scanner unavailable (attempted: {})",
+            attempts.join(", ")
+        );
+    }
+
+    Ok(VulnerabilitySummary {
+        scanner: "none".to_string(),
+        scanned: false,
+        command: candidates
+            .iter()
+            .map(|(_, c, _)| c.as_str())
+            .collect::<Vec<_>>()
+            .join(" || "),
+        scanner_attempts: attempts,
+        unavailable_reason: Some("no container scanner executable found (trivy/grype)".to_string()),
+        suggestions: vec![
+            "Install trivy or grype and rerun build".to_string(),
+            "If unavailable in CI, configure scanner image/tooling in pipeline".to_string(),
+        ],
+        ..Default::default()
+    })
 }
 
 fn run_vulnerability_scan(
