@@ -1,77 +1,85 @@
 name: Build & Release sendbuilds
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    name: build-and-release (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        target: [
-          x86_64-unknown-linux-gnu,
-          i686-unknown-linux-gnu,
-          x86_64-pc-windows-gnu,
-          i686-pc-windows-gnu,
-          x86_64-apple-darwin,
-          aarch64-apple-darwin
-        ]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: sendbuilds-x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            asset_name: sendbuilds-i686-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            asset_name: sendbuilds-x86_64-pc-windows-gnu.exe
+          - os: ubuntu-latest
+            target: i686-pc-windows-gnu
+            asset_name: sendbuilds-i686-pc-windows-gnu.exe
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_name: sendbuilds-x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_name: sendbuilds-aarch64-apple-darwin
 
     steps:
-      # ---------------------------
-      # Checkout repository
-      # ---------------------------
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # ---------------------------
-      # Install Rust
-      # ---------------------------
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
+          targets: ${{ matrix.target }}
 
-      # ---------------------------
-      # Install cross-compilation dependencies for Windows
-      # ---------------------------
-      - name: Install mingw-w64 for Windows
-        if: matrix.target == 'x86_64-pc-windows-gnu' || matrix.target == 'i686-pc-windows-gnu'
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Install Linux i686 toolchain
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
 
-      # ---------------------------
-      # Build the binary
-      # ---------------------------
+      - name: Install MinGW for Windows GNU targets
+        if: contains(matrix.target, 'windows-gnu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+
       - name: Build sendbuilds
         run: cargo build --release --target ${{ matrix.target }}
 
-      # ---------------------------
-      # Prepare binary and checksum
-      # ---------------------------
       - name: Prepare release artifact
-        id: prepare_artifact
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
-          ASSET_NAME="sendbuilds-${{ matrix.target }}"
+          BIN_PATH="target/${{ matrix.target }}/release/sendbuilds"
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            ASSET_NAME+=".exe"
+            BIN_PATH="${BIN_PATH}.exe"
           fi
-          cp target/${{ matrix.target }}/release/sendbuilds dist/$ASSET_NAME
-          # Generate SHA256 checksum
-          sha256sum dist/$ASSET_NAME > dist/$ASSET_NAME.sha256
-          echo "asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
+          cp "$BIN_PATH" "dist/${{ matrix.asset_name }}"
 
-      # ---------------------------
-      # Upload binary + checksum to GitHub Release
-      # ---------------------------
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
+          else
+            shasum -a 256 "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
+          fi
+
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/${{ steps.prepare_artifact.outputs.asset_name }}
-            dist/${{ steps.prepare_artifact.outputs.asset_name }}.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            dist/${{ matrix.asset_name }}
+            dist/${{ matrix.asset_name }}.sha256
