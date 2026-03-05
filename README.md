@@ -90,7 +90,7 @@ sendbuilds info [--env] [--dependencies] [--config sendbuild.toml]
 
 Use `--in-place` to build directly in the current workspace instead of a temp copy (useful for Next.js `pnpm start` expecting `.next` in project root).
 If `sendbuild.toml` is missing, `sendbuilds build` automatically falls back to a smart local mode with inferred defaults and in-place build.
-For zero-config enterprise mode, use `sendbuilds build --git <repo> --docker`: it auto-generates runtime config, enables security-first checks, signs artifacts, emits SBOM/supply-chain metadata, and builds container images even when no Dockerfile exists.
+For zero-config enterprise mode, use `sendbuilds build --git <repo> --docker`: it auto-generates runtime config, enables security-first checks, auto-generates a local signing key if missing, signs artifacts, emits SBOM/supply-chain metadata, and builds container images even when no Dockerfile exists.
 Accepted repo formats include:
 - `owner/repo` (for example `notsliver/sendara-landing`)
 - `https://github.com/owner/repo`
@@ -174,6 +174,8 @@ enabled = true
 [signing]
 enabled = true
 key_env = "SENDBUILD_SIGNING_KEY"
+auto_generate_key = true
+key_file = ".sendbuild/signing.key"
 generate_provenance = true
 cosign = false
 # cosign_key = "env://COSIGN_PRIVATE_KEY"
@@ -238,6 +240,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 - Security-first output is written to artifact root as `sbom.json`, `security-report.json`, and `supply-chain-metadata.json`, and embedded in `build-metrics.json`.
 - CNB lifecycle parity output is written to artifact root under `cnb/lifecycle-contract.json` and `cnb/lifecycle-metadata.json`.
 - Provenance output is written as `provenance.intoto.jsonl` when signing provenance is enabled.
+- If `signing.auto_generate_key = true`, `sendbuilds` creates a random key in `signing.key_file` (default `.sendbuild/signing.key`) and exports it to `signing.key_env` when missing.
 - If both `[security].enabled` and `[scan].enabled` are true, `security-first` runs and legacy `security-scan` is skipped to avoid duplicate scanning.
 - For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.
 

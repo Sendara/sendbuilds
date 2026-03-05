@@ -63,6 +63,8 @@ enabled = true
 [signing]
 enabled = false
 key_env = "SENDBUILD_SIGNING_KEY"
+# auto_generate_key = true
+# key_file = ".sendbuild/signing.key"
 # generate_provenance = true
 # cosign = false
 # cosign_key = "env://COSIGN_PRIVATE_KEY"

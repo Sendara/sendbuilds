@@ -1,6 +1,7 @@
 /target/
 /artifacts/
 /.sendbuild-cache/
+/.sendbuild/
 
 # Rust/Cargo
 **/*.rs.bk

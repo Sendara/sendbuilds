@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use getrandom::getrandom;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -91,7 +92,9 @@ pub fn run() -> Result<()> {
                 return run_quick_build(git, branch, docker, image, in_place, events);
             }
             if BuildConfig::exists(&config) {
-                BuildEngine::load(&config)?
+                let cfg = BuildConfig::from_file(&config)?;
+                prepare_signing_key(cfg.signing.as_ref())?;
+                BuildEngine::from_config(cfg)
                     .with_in_place(in_place)
                     .with_events(events)
                     .run()
@@ -140,8 +143,6 @@ fn run_quick_build(
     if docker {
         targets.push("container_image".to_string());
     }
-
-    ensure_signing_key("SENDBUILD_SIGNING_KEY")?;
 
     let cfg = BuildConfig {
         project: ProjectConfig {
@@ -192,12 +193,16 @@ fn run_quick_build(
         signing: Some(SigningConfig {
             enabled: Some(true),
             key_env: Some("SENDBUILD_SIGNING_KEY".to_string()),
+            auto_generate_key: Some(true),
+            key_file: Some(".sendbuild/signing.key".to_string()),
             generate_provenance: Some(true),
             cosign: Some(false),
             cosign_key: None,
         }),
         compatibility: None,
     };
+
+    prepare_signing_key(cfg.signing.as_ref())?;
 
     BuildEngine::from_config(cfg)
         .with_in_place(in_place || !has_git)
@@ -236,13 +241,87 @@ fn project_name_from_repo(repo: &str) -> String {
     }
 }
 
-fn ensure_signing_key(key_env: &str) -> Result<()> {
-    let value = env::var(key_env)
-        .with_context(|| format!("missing required signing key env: {key_env}"))?;
+fn prepare_signing_key(signing: Option<&SigningConfig>) -> Result<()> {
+    let Some(cfg) = signing else {
+        return Ok(());
+    };
+    if !cfg.enabled.unwrap_or(false) {
+        return Ok(());
+    }
+
+    let key_env = cfg
+        .key_env
+        .as_deref()
+        .unwrap_or("SENDBUILD_SIGNING_KEY")
+        .to_string();
+
+    match env::var(&key_env) {
+        Ok(value) => {
+            validate_signing_key(&value, &key_env)?;
+            return Ok(());
+        }
+        Err(env::VarError::NotUnicode(_)) => {
+            bail!("signing key env `{key_env}` is not valid unicode")
+        }
+        Err(env::VarError::NotPresent) => {}
+    }
+
+    if !cfg.auto_generate_key.unwrap_or(true) {
+        bail!(
+            "missing required signing key env: {key_env}. set it or enable [signing].auto_generate_key = true"
+        );
+    }
+
+    let key_file = cfg
+        .key_file
+        .as_deref()
+        .unwrap_or(".sendbuild/signing.key")
+        .to_string();
+    let key_path = PathBuf::from(&key_file);
+    let key = if key_path.exists() {
+        let existing = fs::read_to_string(&key_path)
+            .with_context(|| format!("failed to read signing key file: {}", key_path.display()))?;
+        let trimmed = existing.trim().to_string();
+        if trimmed.len() >= 32 {
+            trimmed
+        } else {
+            generate_and_store_signing_key(&key_path)?
+        }
+    } else {
+        generate_and_store_signing_key(&key_path)?
+    };
+    validate_signing_key(&key, &key_env)?;
+    env::set_var(&key_env, key);
+    Ok(())
+}
+
+fn validate_signing_key(value: &str, key_env: &str) -> Result<()> {
     if value.trim().len() < 32 {
         bail!("signing key env `{key_env}` must be at least 32 characters");
     }
     Ok(())
+}
+
+fn generate_and_store_signing_key(path: &Path) -> Result<String> {
+    let mut key_bytes = [0u8; 32];
+    getrandom(&mut key_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to gather secure randomness: {e}"))?;
+    let key = hex::encode(key_bytes);
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create signing key directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    fs::write(path, format!("{key}\n"))
+        .with_context(|| format!("failed to write signing key file: {}", path.display()))?;
+
+    Ok(key)
 }
 
 fn init_project(template: Option<&str>, _yes: bool) -> Result<()> {

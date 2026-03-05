@@ -110,6 +110,8 @@ pub struct SandboxConfig {
 pub struct SigningConfig {
     pub enabled: Option<bool>,
     pub key_env: Option<String>,
+    pub auto_generate_key: Option<bool>,
+    pub key_file: Option<String>,
     pub generate_provenance: Option<bool>,
     pub cosign: Option<bool>,
     pub cosign_key: Option<String>,
