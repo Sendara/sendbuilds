@@ -2,6 +2,54 @@
 set -euo pipefail
 
 # ----------------------
+# CLI args
+# ----------------------
+MODE="install"
+CLI_VERSION=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  install.sh [--version <tag>]
+  install.sh --uninstall
+
+Options:
+  --version <tag>  Install/update a specific release tag (example: v0.1.1)
+  --uninstall      Uninstall sendbuilds (asks for confirmation)
+  -h, --help       Show this help
+
+Environment:
+  SENDBUILDS_VERSION  Release tag override (used if --version is not provided)
+  BIN_DIR             Install directory override
+  PLATFORM            Target platform override
+  ARCH                Target architecture override
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uninstall)
+      MODE="uninstall"
+      shift
+      ;;
+    --version)
+      [[ $# -ge 2 ]] || { echo "Missing value for --version"; usage; exit 1; }
+      CLI_VERSION="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+# ----------------------
 # Configuration
 # ----------------------
 REPO_OWNER="Sendara"
@@ -17,6 +65,17 @@ CURL_RETRY_OPTS="--retry 3 --retry-all-errors --retry-delay 2"
 info() { printf "[INFO] %s\n" "$*"; }
 warn() { printf "[WARN] %s\n" "$*"; }
 error() { printf "[ERROR] %s\n" "$*" >&2; exit 1; }
+
+confirm_uninstall() {
+  local answer
+  printf "Are you sure you want to uninstall %s? (yes/no): " "$BIN_NAME"
+  read -r answer
+  case "$answer" in
+    yes|y|Y|YES) return 0 ;;
+    no|n|N|NO) return 1 ;;
+    *) warn "Please answer yes or no."; return 1 ;;
+  esac
+}
 
 # ----------------------
 # Detect platform & arch
@@ -57,17 +116,39 @@ info "Detected platform: $PLATFORM"
 info "Detected architecture: $ARCH"
 info "Target: $TARGET"
 
-# ----------------------
-# Determine URLs
-# ----------------------
-VERSION="${SENDBUILDS_VERSION:-$VERSION}"
-BASE_URL="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$VERSION"
 EXT=""
-
 if [[ "$PLATFORM" == "pc-windows-gnu" ]]; then
   EXT=".exe"
 fi
 
+# ----------------------
+# Determine install directory
+# ----------------------
+DEST_BIN="$BIN_DIR/$BIN_NAME$EXT"
+
+# ----------------------
+# Uninstall flow
+# ----------------------
+if [[ "$MODE" == "uninstall" ]]; then
+  if confirm_uninstall; then
+    if [[ -f "$DEST_BIN" ]]; then
+      info "Removing $DEST_BIN..."
+      rm -f "$DEST_BIN"
+      info "Uninstalled $BIN_NAME from $DEST_BIN"
+    else
+      warn "No installed binary found at $DEST_BIN"
+    fi
+  else
+    info "Uninstall canceled."
+  fi
+  exit 0
+fi
+
+# ----------------------
+# Determine URLs
+# ----------------------
+VERSION="${CLI_VERSION:-${SENDBUILDS_VERSION:-$VERSION}}"
+BASE_URL="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$VERSION"
 BINARY_URL="$BASE_URL/$BIN_NAME-$TARGET$EXT"
 SHA_URL="$BINARY_URL.sha256"
 
@@ -127,11 +208,10 @@ info "SHA256 verified successfully"
 # ----------------------
 # Install binary
 # ----------------------
-DEST_BIN="$BIN_DIR/$BIN_NAME$EXT"
 info "Installing to $DEST_BIN..."
 mv "$TMP_BIN" "$DEST_BIN"
 chmod +x "$DEST_BIN"
-info "Installed $BIN_NAME successfully!"
+info "Installed $BIN_NAME successfully (version: $VERSION)"
 
 # Keep PowerShell/cmd in sync on Windows by updating user PATH.
 if [[ "$PLATFORM" == "pc-windows-gnu" ]]; then
