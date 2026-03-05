@@ -1,107 +1,77 @@
-name: Build & Release
+name: Build & Release sendbuilds
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
-  build:
-    name: Build for ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-
+  build-and-release:
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            asset_name: sendbuilds-linux-x86_64.tar.gz
-            binary_name: sendbuilds
-
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            asset_name: sendbuilds-linux-aarch64.tar.gz
-            binary_name: sendbuilds
-
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset_name: sendbuilds-windows-x86_64.zip
-            binary_name: sendbuilds.exe
-
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            asset_name: sendbuilds-macos-x86_64.tar.gz
-            binary_name: sendbuilds
-
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            asset_name: sendbuilds-macos-aarch64.tar.gz
-            binary_name: sendbuilds
+        target: [
+          x86_64-unknown-linux-gnu,
+          i686-unknown-linux-gnu,
+          x86_64-pc-windows-gnu,
+          i686-pc-windows-gnu,
+          x86_64-apple-darwin,
+          aarch64-apple-darwin
+        ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # ---------------------------
+      # Checkout repository
+      # ---------------------------
+      - name: Checkout code
+        uses: actions/checkout@v3
 
+      # ---------------------------
+      # Install Rust
+      # ---------------------------
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rs/toolchain@v1
         with:
-          targets: ${{ matrix.target }}
+          toolchain: stable
+          override: true
 
-      - name: Install Linux ARM64 linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+      # ---------------------------
+      # Install cross-compilation dependencies for Windows
+      # ---------------------------
+      - name: Install mingw-w64 for Windows
+        if: matrix.target == 'x86_64-pc-windows-gnu' || matrix.target == 'i686-pc-windows-gnu'
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
-      - name: Build (default)
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+      # ---------------------------
+      # Build the binary
+      # ---------------------------
+      - name: Build sendbuilds
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build (linux arm64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package release asset (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $pkgDir = "dist\package"
-          if (Test-Path $pkgDir) { Remove-Item -Recurse -Force $pkgDir }
-          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
-
-          Copy-Item "target/${{ matrix.target }}/release/sendbuilds.exe" "$pkgDir/sendbuilds.exe"
-          Copy-Item "scripts/install-windows.ps1" "$pkgDir/install.ps1"
-
-          Compress-Archive -Path "$pkgDir\*" -DestinationPath "dist\${{ matrix.asset_name }}" -Force
-          $h = (Get-FileHash -Algorithm SHA256 "dist\${{ matrix.asset_name }}").Hash.ToLower()
-          "$h  ${{ matrix.asset_name }}" | Out-File -Encoding ascii "dist\${{ matrix.asset_name }}.sha256"
-
-      - name: Package release asset (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
+      # ---------------------------
+      # Prepare binary and checksum
+      # ---------------------------
+      - name: Prepare release artifact
+        id: prepare_artifact
         run: |
           mkdir -p dist
-          PKG_DIR="dist/package"
-          rm -rf "$PKG_DIR"
-          mkdir -p "$PKG_DIR"
-          cp "target/${{ matrix.target }}/release/sendbuilds" "$PKG_DIR/sendbuilds"
-          cp "scripts/install-unix.sh" "$PKG_DIR/install.sh"
-          chmod +x "$PKG_DIR/sendbuilds" "$PKG_DIR/install.sh"
-          tar -C "$PKG_DIR" -czf "dist/${{ matrix.asset_name }}" .
-          HASH="$(openssl dgst -sha256 "dist/${{ matrix.asset_name }}" | awk '{print $NF}')"
-          printf "%s  %s\n" "$HASH" "${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
+          ASSET_NAME="sendbuilds-${{ matrix.target }}"
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            ASSET_NAME+=".exe"
+          fi
+          cp target/${{ matrix.target }}/release/sendbuilds dist/$ASSET_NAME
+          # Generate SHA256 checksum
+          sha256sum dist/$ASSET_NAME > dist/$ASSET_NAME.sha256
+          echo "asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
 
-      - name: Upload Release
+      # ---------------------------
+      # Upload binary + checksum to GitHub Release
+      # ---------------------------
+      - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/${{ matrix.asset_name }}
-            dist/${{ matrix.asset_name }}.sha256
+            dist/${{ steps.prepare_artifact.outputs.asset_name }}
+            dist/${{ steps.prepare_artifact.outputs.asset_name }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
