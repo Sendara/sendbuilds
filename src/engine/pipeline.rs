@@ -379,21 +379,82 @@ impl BuildEngine {
             Ok(())
         })?);
 
-        let should_scan_container_image = security_enabled
-            && target_includes_container(cfg.deploy.targets.as_ref())
-            && cfg.deploy.container_image.is_some();
-        if should_scan_container_image {
-            let image = cfg.deploy.container_image.clone().unwrap_or_default();
+        if security_enabled {
+            let image = cfg.deploy.container_image.clone();
             let security_cfg = cfg.security.clone();
             steps.push(self.execute_step(&ctx, "container-security-scan", |_e, cctx, step| {
-                let summary = security::run_container_image_scan(
-                    &image,
-                    security_cfg.as_ref(),
-                    &cctx.env,
-                    sandbox_enabled,
-                )?;
+                let mut scans = Vec::new();
+
+                if let Some(img) = image.as_deref() {
+                    let image_summary = security::run_container_image_scan(
+                        img,
+                        security_cfg.as_ref(),
+                        &cctx.env,
+                        sandbox_enabled,
+                    )?;
+                    step.push_log(format!(
+                        "target=image:{} scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} misconfigurations={} secrets={}",
+                        img,
+                        image_summary.scanner,
+                        image_summary.scanned,
+                        image_summary.total,
+                        image_summary.critical,
+                        image_summary.high,
+                        image_summary.moderate,
+                        image_summary.low,
+                        image_summary.info,
+                        image_summary.misconfigurations,
+                        image_summary.secrets
+                    ));
+                    if let Some(reason) = &image_summary.unavailable_reason {
+                        step.push_log(format!("target=image:{img} unavailable_reason={reason}"));
+                    }
+                    scans.push(image_summary);
+                }
+
+                if let Some(p) = &publish_result {
+                    for output in &p.outputs {
+                        if !is_tar_artifact(output) {
+                            continue;
+                        }
+                        let tar_summary = security::run_container_tar_scan(
+                            output,
+                            security_cfg.as_ref(),
+                            &cctx.env,
+                            sandbox_enabled,
+                        )?;
+                        step.push_log(format!(
+                            "target=tar:{} scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} misconfigurations={} secrets={}",
+                            output.display(),
+                            tar_summary.scanner,
+                            tar_summary.scanned,
+                            tar_summary.total,
+                            tar_summary.critical,
+                            tar_summary.high,
+                            tar_summary.moderate,
+                            tar_summary.low,
+                            tar_summary.info,
+                            tar_summary.misconfigurations,
+                            tar_summary.secrets
+                        ));
+                        if let Some(reason) = &tar_summary.unavailable_reason {
+                            step.push_log(format!(
+                                "target=tar:{} unavailable_reason={reason}",
+                                output.display()
+                            ));
+                        }
+                        scans.push(tar_summary);
+                    }
+                }
+
+                if scans.is_empty() {
+                    step.push_log("no image/tar targets available for container scan".to_string());
+                    return Ok(());
+                }
+
+                let summary = security::merge_scan_summaries(&scans);
                 step.push_log(format!(
-                    "scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={}",
+                    "aggregated scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} misconfigurations={} secrets={}",
                     summary.scanner,
                     summary.scanned,
                     summary.total,
@@ -401,17 +462,10 @@ impl BuildEngine {
                     summary.high,
                     summary.moderate,
                     summary.low,
-                    summary.info
+                    summary.info,
+                    summary.misconfigurations,
+                    summary.secrets
                 ));
-                if let Some(reason) = &summary.unavailable_reason {
-                    step.push_log(format!("unavailable_reason={reason}"));
-                }
-                if !summary.packages.is_empty() {
-                    step.push_log(format!("packages={}", summary.packages.join(",")));
-                }
-                if !summary.suggestions.is_empty() {
-                    step.push_log(format!("suggestions={}", summary.suggestions.join(" | ")));
-                }
 
                 if let Some(report) = security_report.as_mut() {
                     report.container_scan = Some(summary.clone());
@@ -425,9 +479,23 @@ impl BuildEngine {
                     .as_ref()
                     .and_then(|c| c.critical_threshold)
                     .unwrap_or(0);
+                let fail_on_scanner_unavailable = security_cfg
+                    .as_ref()
+                    .and_then(|c| c.fail_on_scanner_unavailable)
+                    .unwrap_or(true);
+                if fail_on_scanner_unavailable && scans.iter().all(|s| !s.scanned) {
+                    bail!(
+                        "security policy violation: required container/image tar scanner unavailable (attempted: {})",
+                        scans
+                            .iter()
+                            .flat_map(|s| s.scanner_attempts.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 if fail_on_critical && summary.critical > critical_threshold {
                     bail!(
-                        "security policy violation: container image critical vulnerabilities {} exceed threshold {}",
+                        "security policy violation: container scan critical vulnerabilities {} exceed threshold {}",
                         summary.critical,
                         critical_threshold
                     );
@@ -1185,16 +1253,9 @@ impl BuildEngine {
     }
 }
 
-fn target_includes_container(targets: Option<&Vec<String>>) -> bool {
-    let selected = targets
-        .cloned()
-        .unwrap_or_else(|| vec!["directory".to_string()]);
-    selected.iter().any(|t| {
-        matches!(
-            t.as_str(),
-            "container" | "container_image"
-        )
-    })
+fn is_tar_artifact(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().to_lowercase();
+    normalized.ends_with(".tar") || normalized.ends_with(".tar.gz") || normalized.ends_with(".tgz")
 }
 
 fn log_build_overview(steps: &[Step], total_secs: f32, cache_metrics: &CacheMetrics) {

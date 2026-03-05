@@ -41,6 +41,8 @@ pub struct VulnerabilitySummary {
     pub moderate: u32,
     pub low: u32,
     pub info: u32,
+    pub misconfigurations: u32,
+    pub secrets: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -178,7 +180,7 @@ pub fn run(
 pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
-        "security summary scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} unavailable_reason={}",
+        "security summary scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} misconfigurations={} secrets={} unavailable_reason={}",
         report.vulnerability_scan.scanner,
         report.vulnerability_scan.scanned,
         report.vulnerability_scan.total,
@@ -187,6 +189,8 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
         report.vulnerability_scan.moderate,
         report.vulnerability_scan.low,
         report.vulnerability_scan.info,
+        report.vulnerability_scan.misconfigurations,
+        report.vulnerability_scan.secrets,
         report
             .vulnerability_scan
             .unavailable_reason
@@ -233,7 +237,7 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
     }
     if let Some(container) = &report.container_scan {
         lines.push(format!(
-            "container scan scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} unavailable_reason={}",
+            "container scan scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} misconfigurations={} secrets={} unavailable_reason={}",
             container.scanner,
             container.scanned,
             container.total,
@@ -242,6 +246,8 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
             container.moderate,
             container.low,
             container.info,
+            container.misconfigurations,
+            container.secrets,
             container
                 .unavailable_reason
                 .clone()
@@ -256,18 +262,17 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
 
 pub fn run_container_image_scan(
     image: &str,
-    config: Option<&SecurityConfig>,
+    _config: Option<&SecurityConfig>,
     env: &HashMap<String, String>,
     sandbox: bool,
 ) -> Result<VulnerabilitySummary> {
-    let fail_on_scanner_unavailable = config
-        .and_then(|c| c.fail_on_scanner_unavailable)
-        .unwrap_or(true);
     let candidates = [
         (
             "trivy-image",
-            format!("trivy image --quiet --format json {image}"),
-            ScanParser::GenericJson,
+            format!(
+                "trivy image --quiet --format json --scanners vuln,misconfig,secret {image}"
+            ),
+            ScanParser::Trivy,
         ),
         ("grype-image", format!("grype {image} -o json"), ScanParser::GenericJson),
     ];
@@ -301,13 +306,6 @@ pub fn run_container_image_scan(
         return Ok(summary);
     }
 
-    if fail_on_scanner_unavailable {
-        bail!(
-            "security policy violation: required container scanner unavailable (attempted: {})",
-            attempts.join(", ")
-        );
-    }
-
     Ok(VulnerabilitySummary {
         scanner: "none".to_string(),
         scanned: false,
@@ -324,6 +322,145 @@ pub fn run_container_image_scan(
         ],
         ..Default::default()
     })
+}
+
+pub fn run_container_tar_scan(
+    archive_path: &Path,
+    _config: Option<&SecurityConfig>,
+    env: &HashMap<String, String>,
+    sandbox: bool,
+) -> Result<VulnerabilitySummary> {
+    let escaped = archive_path.display().to_string().replace('"', "\\\"");
+    let candidates = [
+        (
+            "trivy-image-input",
+            format!(
+                "trivy image --input \"{escaped}\" --quiet --format json --scanners vuln,misconfig,secret"
+            ),
+            ScanParser::Trivy,
+        ),
+        (
+            "trivy-fs",
+            format!(
+                "trivy fs \"{escaped}\" --quiet --format json --scanners vuln,misconfig,secret"
+            ),
+            ScanParser::Trivy,
+        ),
+    ];
+
+    let mut attempts = Vec::new();
+    for (scanner, command, parser) in candidates.iter() {
+        attempts.push(format!("{scanner}:{command}"));
+        let run = shell::run_allow_failure(command, Path::new("."), env, sandbox)?;
+        if command_not_found_in_logs(&run.logs) {
+            continue;
+        }
+        let mut summary = VulnerabilitySummary {
+            scanner: (*scanner).to_string(),
+            scanned: true,
+            command: command.clone(),
+            scanner_attempts: attempts.clone(),
+            suggestions: vec![
+                "Install trivy to scan image/rootfs archives in CI".to_string(),
+                "Regenerate tar artifact from a patched base/runtime".to_string(),
+                "Review secret and misconfiguration findings before deploy".to_string(),
+            ],
+            ..Default::default()
+        };
+        parse_scan_output(*parser, &run.logs, &mut summary);
+        if summary.packages.is_empty() {
+            summary.packages = extract_package_names(&run.logs);
+        }
+        if summary.total == 0 && !summary.packages.is_empty() {
+            summary.total = summary.packages.len() as u32;
+        }
+        return Ok(summary);
+    }
+
+    Ok(VulnerabilitySummary {
+        scanner: "none".to_string(),
+        scanned: false,
+        command: candidates
+            .iter()
+            .map(|(_, c, _)| c.as_str())
+            .collect::<Vec<_>>()
+            .join(" || "),
+        scanner_attempts: attempts,
+        unavailable_reason: Some("no archive scanner executable found (trivy)".to_string()),
+        suggestions: vec![
+            "Install trivy and rerun build".to_string(),
+            "If unavailable in CI, configure scanner image/tooling in pipeline".to_string(),
+        ],
+        ..Default::default()
+    })
+}
+
+pub fn merge_scan_summaries(summaries: &[VulnerabilitySummary]) -> VulnerabilitySummary {
+    let mut out = VulnerabilitySummary::default();
+    if summaries.is_empty() {
+        return out;
+    }
+
+    let mut scanners = Vec::new();
+    let mut commands = Vec::new();
+    let mut attempts = Vec::new();
+    let mut packages = Vec::new();
+    let mut suggestions = Vec::new();
+    let mut unavailable = Vec::new();
+
+    for s in summaries {
+        if !s.scanner.is_empty() && !scanners.contains(&s.scanner) {
+            scanners.push(s.scanner.clone());
+        }
+        if !s.command.is_empty() && !commands.contains(&s.command) {
+            commands.push(s.command.clone());
+        }
+        for a in &s.scanner_attempts {
+            if !attempts.contains(a) {
+                attempts.push(a.clone());
+            }
+        }
+        for p in &s.packages {
+            if !packages.contains(p) {
+                packages.push(p.clone());
+            }
+        }
+        for sug in &s.suggestions {
+            if !suggestions.contains(sug) {
+                suggestions.push(sug.clone());
+            }
+        }
+        if let Some(reason) = &s.unavailable_reason {
+            if !unavailable.contains(reason) {
+                unavailable.push(reason.clone());
+            }
+        }
+
+        out.scanned |= s.scanned;
+        out.total += s.total;
+        out.critical += s.critical;
+        out.high += s.high;
+        out.moderate += s.moderate;
+        out.low += s.low;
+        out.info += s.info;
+        out.misconfigurations += s.misconfigurations;
+        out.secrets += s.secrets;
+    }
+
+    packages.sort();
+    packages.dedup();
+    suggestions.sort();
+    suggestions.dedup();
+
+    out.scanner = scanners.join(",");
+    out.command = commands.join(" || ");
+    out.scanner_attempts = attempts;
+    out.packages = packages.into_iter().take(25).collect();
+    out.suggestions = suggestions;
+    if !out.scanned && !unavailable.is_empty() {
+        out.unavailable_reason = Some(unavailable.join(" | "));
+    }
+    out
 }
 
 fn run_vulnerability_scan(
@@ -421,6 +558,7 @@ enum ScanParser {
     CargoAudit,
     ComposerAudit,
     DotnetAudit,
+    Trivy,
     GenericJson,
 }
 
@@ -625,7 +763,78 @@ fn parse_scan_output(parser: ScanParser, logs: &[String], summary: &mut Vulnerab
         ScanParser::CargoAudit => parse_cargo_audit_value(&val, summary),
         ScanParser::ComposerAudit => parse_composer_audit_value(&val, summary),
         ScanParser::DotnetAudit => parse_dotnet_audit_value(&val, summary),
+        ScanParser::Trivy => parse_trivy_value(&val, summary),
         ScanParser::GenericJson => parse_generic_vuln_json(&val, summary),
+    }
+}
+
+fn parse_trivy_value(val: &Value, summary: &mut VulnerabilitySummary) {
+    let Some(results) = val.get("Results").and_then(Value::as_array) else {
+        return;
+    };
+    let mut packages = Vec::new();
+
+    for result in results {
+        if let Some(vulns) = result.get("Vulnerabilities").and_then(Value::as_array) {
+            for vuln in vulns {
+                summary.total += 1;
+                if let Some(sev) = vuln.get("Severity").and_then(Value::as_str) {
+                    bump_severity(summary, sev);
+                }
+                if let Some(name) = vuln
+                    .get("PkgName")
+                    .and_then(Value::as_str)
+                    .or_else(|| vuln.get("PkgID").and_then(Value::as_str))
+                {
+                    packages.push(name.to_string());
+                }
+            }
+        }
+        if let Some(misconfigs) = result.get("Misconfigurations").and_then(Value::as_array) {
+            for mis in misconfigs {
+                summary.total += 1;
+                summary.misconfigurations += 1;
+                if let Some(sev) = mis.get("Severity").and_then(Value::as_str) {
+                    bump_severity(summary, sev);
+                }
+                if let Some(id) = mis
+                    .get("ID")
+                    .and_then(Value::as_str)
+                    .or_else(|| mis.get("Type").and_then(Value::as_str))
+                {
+                    packages.push(id.to_string());
+                }
+            }
+        }
+        if let Some(secrets) = result.get("Secrets").and_then(Value::as_array) {
+            for secret in secrets {
+                summary.total += 1;
+                summary.secrets += 1;
+                if let Some(sev) = secret.get("Severity").and_then(Value::as_str) {
+                    bump_severity(summary, sev);
+                } else {
+                    summary.high += 1;
+                }
+                if let Some(rule) = secret.get("RuleID").and_then(Value::as_str) {
+                    packages.push(rule.to_string());
+                }
+            }
+        }
+    }
+
+    packages.sort();
+    packages.dedup();
+    summary.packages = packages.into_iter().take(25).collect();
+}
+
+fn bump_severity(summary: &mut VulnerabilitySummary, severity: &str) {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => summary.critical += 1,
+        "high" => summary.high += 1,
+        "medium" | "moderate" => summary.moderate += 1,
+        "low" => summary.low += 1,
+        "info" | "informational" | "unknown" => summary.info += 1,
+        _ => {}
     }
 }
 
