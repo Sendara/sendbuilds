@@ -43,6 +43,7 @@ pub struct VulnerabilitySummary {
     pub info: u32,
     pub misconfigurations: u32,
     pub secrets: u32,
+    pub detailed_findings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -164,9 +165,8 @@ pub fn run(
 
     if fail_on_critical && report.vulnerability_scan.critical > critical_threshold {
         bail!(
-            "security policy violation: critical vulnerabilities {} exceed threshold {}",
-            report.vulnerability_scan.critical,
-            critical_threshold
+            "{}",
+            format_policy_violation_with_findings(&report.vulnerability_scan, critical_threshold)
         );
     }
 
@@ -208,6 +208,9 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
             "security suggestions {}",
             report.vulnerability_scan.suggestions.join(" | ")
         ));
+    }
+    for detail in report.vulnerability_scan.detailed_findings.iter().take(3) {
+        lines.push(format!("security finding {}", detail.replace('\n', " | ")));
     }
     lines.push(format!(
         "security policy fail_on_critical={} critical_threshold={}",
@@ -407,6 +410,7 @@ pub fn merge_scan_summaries(summaries: &[VulnerabilitySummary]) -> Vulnerability
     let mut packages = Vec::new();
     let mut suggestions = Vec::new();
     let mut unavailable = Vec::new();
+    let mut details = Vec::new();
 
     for s in summaries {
         if !s.scanner.is_empty() && !scanners.contains(&s.scanner) {
@@ -428,6 +432,11 @@ pub fn merge_scan_summaries(summaries: &[VulnerabilitySummary]) -> Vulnerability
         for sug in &s.suggestions {
             if !suggestions.contains(sug) {
                 suggestions.push(sug.clone());
+            }
+        }
+        for d in &s.detailed_findings {
+            if !details.contains(d) {
+                details.push(d.clone());
             }
         }
         if let Some(reason) = &s.unavailable_reason {
@@ -457,6 +466,7 @@ pub fn merge_scan_summaries(summaries: &[VulnerabilitySummary]) -> Vulnerability
     out.scanner_attempts = attempts;
     out.packages = packages.into_iter().take(25).collect();
     out.suggestions = suggestions;
+    out.detailed_findings = details.into_iter().take(12).collect();
     if !out.scanned && !unavailable.is_empty() {
         out.unavailable_reason = Some(unavailable.join(" | "));
     }
@@ -848,7 +858,108 @@ fn parse_npm_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {
     summary.total = summary.critical + summary.high + summary.moderate + summary.low + summary.info;
     if let Some(vulns) = val.get("vulnerabilities").and_then(Value::as_object) {
         summary.packages = vulns.keys().take(10).map(|k| k.to_string()).collect();
+        summary.detailed_findings = render_npm_findings(vulns, 6);
     }
+}
+
+fn render_npm_findings(vulns: &serde_json::Map<String, Value>, max_packages: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, info) in vulns.iter().take(max_packages) {
+        let severity = info
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_uppercase();
+        let source = guess_npm_lockfile_source(info);
+        let upgrade = npm_upgrade_hint(name, info);
+        let vulnerabilities = npm_cve_lines(info, 6);
+
+        let mut entry = format!(
+            "{name}\n  Source: {source}\n  Severity: {severity}\n  {upgrade}"
+        );
+        if !vulnerabilities.is_empty() {
+            entry.push_str("\n\n  Vulnerabilities:");
+            for line in vulnerabilities {
+                entry.push_str(&format!("\n  - {line}"));
+            }
+        }
+        out.push(entry);
+    }
+    out
+}
+
+fn guess_npm_lockfile_source(info: &Value) -> String {
+    if info.get("nodes").is_some() || info.get("effects").is_some() {
+        return "package-lock.json".to_string();
+    }
+    "dependency lockfile".to_string()
+}
+
+fn npm_upgrade_hint(name: &str, info: &Value) -> String {
+    match info.get("fixAvailable") {
+        Some(Value::Bool(true)) => format!("Upgrade: npm install {name}@latest"),
+        Some(Value::Bool(false)) => "Upgrade: no automatic fix available".to_string(),
+        Some(Value::Object(o)) => {
+            let fixed_name = o.get("name").and_then(Value::as_str).unwrap_or(name);
+            let fixed_ver = o.get("version").and_then(Value::as_str).unwrap_or("latest");
+            format!("Upgrade to {fixed_ver}: npm install {fixed_name}@^{fixed_ver}")
+        }
+        _ => format!("Upgrade: run npm audit fix or npm install {name}@latest"),
+    }
+}
+
+fn npm_cve_lines(info: &Value, max_items: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(via) = info.get("via").and_then(Value::as_array) else {
+        return out;
+    };
+    for item in via.iter().take(max_items) {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let id = obj
+            .get("source")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| obj.get("name").and_then(Value::as_str).map(ToString::to_string))
+            .or_else(|| obj.get("title").and_then(Value::as_str).map(ToString::to_string))
+            .unwrap_or_else(|| "advisory".to_string());
+        let sev = obj
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_uppercase();
+        let url = obj
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("no-url");
+        out.push(format!("{id} ({sev}): {url}"));
+    }
+    out
+}
+
+fn format_policy_violation_with_findings(
+    summary: &VulnerabilitySummary,
+    critical_threshold: u32,
+) -> String {
+    let mut msg = format!(
+        "security policy violation: critical vulnerabilities {} exceed threshold {}.",
+        summary.critical, critical_threshold
+    );
+    if !summary.detailed_findings.is_empty() {
+        msg.push_str(&format!(
+            "\n\nFound {} vulnerable package(s):\n\n",
+            summary.detailed_findings.len()
+        ));
+        for finding in summary.detailed_findings.iter().take(6) {
+            msg.push_str(finding);
+            msg.push('\n');
+            msg.push('\n');
+        }
+    } else if !summary.packages.is_empty() {
+        msg.push_str(&format!("\n\nPackages: {}", summary.packages.join(", ")));
+    }
+    msg.trim_end().to_string()
 }
 
 fn parse_pip_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {

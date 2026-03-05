@@ -149,26 +149,74 @@ fn parse_npm_audit_summary(logs: &[String]) -> String {
         return String::new();
     }
 
-    let mut packages = Vec::new();
-    for (name, info) in vulns.iter().take(8) {
+    let mut blocks = Vec::new();
+    for (name, info) in vulns.iter().take(5) {
         let severity = info
             .get("severity")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let fix = match info.get("fixAvailable") {
-            Some(Value::Bool(true)) => "fix:available".to_string(),
-            Some(Value::Bool(false)) => "fix:none".to_string(),
-            Some(Value::Object(o)) => {
-                let n = o.get("name").and_then(Value::as_str).unwrap_or("upgrade");
-                format!("fix:{n}")
+            .unwrap_or("unknown")
+            .to_uppercase();
+        let upgrade = npm_upgrade_hint(name, info);
+        let advisories = npm_advisory_lines(info, 6);
+
+        let mut block =
+            format!("{name}\n  Source: package-lock.json\n  Severity: {severity}\n  {upgrade}");
+        if !advisories.is_empty() {
+            block.push_str("\n\n  Vulnerabilities:");
+            for advisory in advisories {
+                block.push_str(&format!("\n  - {advisory}"));
             }
-            _ => "fix:unknown".to_string(),
-        };
-        packages.push(format!("{name}({severity},{fix})"));
+        }
+        blocks.push(block);
     }
 
-    let actions = "suggestions: 1) npm audit fix 2) update vulnerable packages/lockfile 3) if blocked, pin safe versions and rebuild cache";
-    format!("vulnerable packages: {}. {}", packages.join(", "), actions)
+    format!(
+        "Found {} vulnerable package(s):\n\n{}",
+        blocks.len(),
+        blocks.join("\n\n")
+    )
+}
+
+fn npm_upgrade_hint(name: &str, info: &Value) -> String {
+    match info.get("fixAvailable") {
+        Some(Value::Bool(true)) => format!("Upgrade: npm install {name}@latest"),
+        Some(Value::Bool(false)) => "Upgrade: no automatic fix available".to_string(),
+        Some(Value::Object(o)) => {
+            let fixed_name = o.get("name").and_then(Value::as_str).unwrap_or(name);
+            let fixed_ver = o.get("version").and_then(Value::as_str).unwrap_or("latest");
+            format!("Upgrade to {fixed_ver}: npm install {fixed_name}@^{fixed_ver}")
+        }
+        _ => format!("Upgrade: run npm audit fix or npm install {name}@latest"),
+    }
+}
+
+fn npm_advisory_lines(info: &Value, max_items: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(via) = info.get("via").and_then(Value::as_array) else {
+        return out;
+    };
+    for item in via.iter().take(max_items) {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let id = obj
+            .get("source")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("name").and_then(Value::as_str))
+            .or_else(|| obj.get("title").and_then(Value::as_str))
+            .unwrap_or("advisory");
+        let sev = obj
+            .get("severity")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_uppercase();
+        let url = obj
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("no-url");
+        out.push(format!("{id} ({sev}): {url}"));
+    }
+    out
 }
 
 fn collect_json(logs: &[String]) -> Option<String> {
@@ -216,7 +264,9 @@ mod tests {
                 .to_string(),
         ];
         let summary = parse_npm_audit_summary(&logs);
-        assert!(summary.contains("minimist(high,fix:available)"));
+        assert!(summary.contains("Found 1 vulnerable package(s):"));
+        assert!(summary.contains("minimist"));
+        assert!(summary.contains("Severity: HIGH"));
     }
 
     #[test]

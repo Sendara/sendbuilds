@@ -494,10 +494,16 @@ impl BuildEngine {
                     );
                 }
                 if fail_on_critical && summary.critical > critical_threshold {
+                    let package_hint = if summary.packages.is_empty() {
+                        "none".to_string()
+                    } else {
+                        summary.packages.iter().take(12).cloned().collect::<Vec<_>>().join(", ")
+                    };
                     bail!(
-                        "security policy violation: container scan critical vulnerabilities {} exceed threshold {}",
+                        "security policy violation: container scan critical vulnerabilities {} exceed threshold {}. packages={}",
                         summary.critical,
-                        critical_threshold
+                        critical_threshold,
+                        package_hint
                     );
                 }
                 Ok(())
