@@ -34,6 +34,10 @@ Expand-Archive .\sendbuilds-windows-x86_64.zip -DestinationPath .\sendbuilds
 sendbuilds.exe --help
 ```
 
+Windows note:
+- `sendbuilds.exe` is a CLI, so double-clicking it in Explorer opens/closes quickly by design.
+- Run it from Terminal/PowerShell (`sendbuilds.exe --help`).
+
 ## Local development and testing
 
 Build and run the CLI locally:
