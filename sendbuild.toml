@@ -36,8 +36,8 @@ artifact_dir = "./artifacts"
 # max_age_days = 14
 
 [output]
-# set false to hide all machine-readable EVENT lines
-events = true
+# set true to show machine-readable EVENT lines
+events = false
 
 [cache]
 enabled = true

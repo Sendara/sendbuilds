@@ -115,7 +115,7 @@ keep_last = 5
 max_age_days = 14
 
 [output]
-events = true # set false to hide EVENT {...} lines
+events = false # default hidden; set true to show EVENT {...} lines
 
 [cache]
 enabled = true
@@ -160,7 +160,7 @@ API_BASE_URL = "https://api.example.com"
 
 ## Step events
 
-Machine-readable step events are emitted to stdout:
+When `[output].events = true` (or `--events true`), machine-readable step events are emitted to stdout:
 
 ```text
 EVENT {"type":"STEP_STARTED","channel":"build-step","step":"install","status":"running","timestamp":"..."}

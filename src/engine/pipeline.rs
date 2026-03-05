@@ -78,7 +78,7 @@ impl BuildEngine {
         let events_enabled = self
             .events_override
             .or_else(|| cfg.output.as_ref().and_then(|o| o.events))
-            .unwrap_or(true);
+            .unwrap_or(false);
         events::set_enabled(events_enabled);
 
         let env_map = self.resolve_env();
