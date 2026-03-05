@@ -81,6 +81,11 @@ impl BuildEngine {
 
         log::header(&format!("sendbuild - {}", cfg.project.name));
         log::kv(
+            "buildpack",
+            &format!("sendbuilds v{}", env!("CARGO_PKG_VERSION")),
+        );
+        log::kv("lifecycle", cnb::LIFECYCLE_API);
+        log::kv(
             "language",
             cfg.project.language.as_deref().unwrap_or("auto-detect"),
         );
@@ -165,6 +170,30 @@ impl BuildEngine {
 
                     dep_install_cmd =
                         self.optimize_install_cmd(&dep_install_cmd, &cctx.work_dir, dep_cache_hit);
+                    let total_files = current_signatures.len();
+                    let updated_files = if changed.iter().any(|v| v == "all") {
+                        total_files
+                    } else {
+                        changed.len().min(total_files)
+                    };
+                    let reused_files = total_files.saturating_sub(updated_files);
+                    step.push_log(format!(
+                        "incremental_summary reused={} updated={}",
+                        reused_files, updated_files
+                    ));
+                    log::kv(
+                        "Preparing incremental build data",
+                        &format!("reused={} updated={}", reused_files, updated_files),
+                    );
+                    let cache_size = dir_size_bytes(c.root()).unwrap_or_default();
+                    step.push_log(format!(
+                        "cache_size_mb={:.1}",
+                        cache_size as f64 / (1024.0 * 1024.0)
+                    ));
+                    log::kv(
+                        "Cache size",
+                        &format!("{:.1}MB", cache_size as f64 / (1024.0 * 1024.0)),
+                    );
                     step.push_log(format!("dependency_cache_hit={dep_cache_hit}"));
                     step.push_log(format!(
                         "dependency_dir_cache_allowed={dep_dir_cache_allowed}"
@@ -470,6 +499,7 @@ impl BuildEngine {
         })?);
 
         log::steps_summary(&steps);
+        log_build_overview(&steps, ctx.elapsed_secs(), &cache_metrics);
         log::section(&format!("done in {:.1}s", ctx.elapsed_secs()));
         Ok(())
     }
@@ -1003,6 +1033,24 @@ impl BuildEngine {
         for w in &published.warnings {
             step.push_log(format!("warning {w}"));
         }
+        for out in &published.outputs {
+            let size_bytes = path_size_bytes(out).unwrap_or_default();
+            let label = if out.is_dir() {
+                "Generated bundle"
+            } else {
+                "Generated artifact"
+            };
+            step.push_log(format!(
+                "{}: {} ({})",
+                label,
+                out.display(),
+                human_size(size_bytes)
+            ));
+            log::kv(
+                label,
+                &format!("{} ({})", out.display(), human_size(size_bytes)),
+            );
+        }
         let gc = artifacts::garbage_collect_artifacts(
             &ctx.artifact_dir,
             &published.root,
@@ -1022,6 +1070,129 @@ impl BuildEngine {
             ));
         }
         Ok(published)
+    }
+}
+
+fn log_build_overview(steps: &[Step], total_secs: f32, cache_metrics: &CacheMetrics) {
+    let mut peak_cpu = 0.0f32;
+    let mut peak_mem = 0u64;
+    let mut disk_written = 0u64;
+    for step in steps {
+        if let Some(r) = step.resources {
+            if r.cpu_percent > peak_cpu {
+                peak_cpu = r.cpu_percent;
+            }
+            if r.memory_mb > peak_mem {
+                peak_mem = r.memory_mb;
+            }
+            disk_written = disk_written.saturating_add(r.disk_mb);
+        }
+    }
+
+    let cache_restored = if cache_metrics.hits > 0 { "yes" } else { "no" };
+    let layer_total = cache_metrics.hits + cache_metrics.misses;
+    let layers_reused = if layer_total > 0 {
+        format!("{}/{}", cache_metrics.hits, layer_total)
+    } else {
+        "0/0".to_string()
+    };
+
+    log::section("Build Overview");
+    log::kv("Total build duration", &format!("{total_secs:.1}s"));
+    log::kv("Cache restored", cache_restored);
+    log::kv("Layers reused", &layers_reused);
+    if let Some((reused, updated)) = incremental_counts_from_steps(steps) {
+        log::kv(
+            "Preparing incremental build data",
+            &format!("reused={} updated={}", reused, updated),
+        );
+    }
+    if let Some(cache_size_mb) = cache_size_from_steps(steps) {
+        log::kv("Cache size", &format!("{cache_size_mb:.1}MB"));
+    }
+    log::kv("Peak memory", &format!("{peak_mem}MB"));
+    log::kv("Peak CPU", &format!("{peak_cpu:.1}%"));
+    log::kv("Disk written", &format!("{disk_written}MB"));
+}
+
+fn incremental_counts_from_steps(steps: &[Step]) -> Option<(u64, u64)> {
+    for step in steps {
+        for line in &step.logs {
+            if let Some(rest) = line.strip_prefix("incremental_summary ") {
+                let mut reused = None;
+                let mut updated = None;
+                for token in rest.split_whitespace() {
+                    if let Some(v) = token.strip_prefix("reused=") {
+                        reused = v.parse::<u64>().ok();
+                    } else if let Some(v) = token.strip_prefix("updated=") {
+                        updated = v.parse::<u64>().ok();
+                    }
+                }
+                if let (Some(r), Some(u)) = (reused, updated) {
+                    return Some((r, u));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn cache_size_from_steps(steps: &[Step]) -> Option<f64> {
+    for step in steps {
+        for line in &step.logs {
+            if let Some(v) = line.strip_prefix("cache_size_mb=") {
+                if let Ok(parsed) = v.parse::<f64>() {
+                    return Some(parsed);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn path_size_bytes(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_file() {
+        return Ok(fs::metadata(path)?.len());
+    }
+    dir_size_bytes(path)
+}
+
+fn dir_size_bytes(root: &Path) -> Result<u64> {
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn human_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1}GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1}MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1}KB", b / KB)
+    } else {
+        format!("{bytes}B")
     }
 }
 

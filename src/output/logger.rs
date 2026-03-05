@@ -1,7 +1,9 @@
 use chrono::Local;
 use colored::Colorize;
 
-use crate::core::Step;
+use crate::core::{Step, StepStatus};
+
+const SLOW_STEP_SECS: f32 = 10.0;
 
 const BANNER: &str = r#" _____  ______ _   _ _____  ____  _    _ _____ _      _____  
 / ____|/ ____| \ | |  __ \|  _ \| |  | |_   _| |    |  __ \ 
@@ -87,32 +89,58 @@ pub fn step_failed(step: &Step) {
 }
 
 pub fn steps_summary(steps: &[Step]) {
-    section("Build summary");
+    section("Build Summary");
+    section("────────────────────────────────");
     for step_data in steps {
         let duration = step_data.duration_secs.unwrap_or_default();
-        let resources = step_data
-            .resources
-            .map(|r| {
-                format!(
-                    " cpu={:.1}% mem={}MB disk={}MB",
-                    r.cpu_percent, r.memory_mb, r.disk_mb
-                )
-            })
-            .unwrap_or_default();
+        let slow = if duration >= SLOW_STEP_SECS {
+            " [slow]"
+        } else {
+            ""
+        };
+        let label = friendly_step(&step_data.name);
+        let dots = if label.len() < 34 {
+            ".".repeat(34 - label.len())
+        } else {
+            ".".to_string()
+        };
         let msg = format!(
-            "{}: status={} duration={:.1}s logs={}{}",
-            friendly_step(&step_data.name),
-            step_data.status.as_str(),
-            duration,
-            step_data.logs.len(),
-            resources
+            "{label}{dots} {} ({duration:.1}s){slow}",
+            step_data.status.as_str()
         );
-        match step_data.status.as_str() {
-            "failed" => emit("ERROR", &msg),
-            "running" => emit("WARN", &msg),
+        match step_data.status {
+            StepStatus::Failed => emit("ERROR", &msg),
+            StepStatus::Running => emit("WARN", &msg),
             _ => emit("INFO", &msg),
         }
     }
+
+    let warnings = collect_warnings(steps);
+    if !warnings.is_empty() {
+        section("Warnings:");
+        for warning in warnings {
+            emit("WARN", &format!("- {warning}"));
+        }
+    }
+}
+
+fn collect_warnings(steps: &[Step]) -> Vec<String> {
+    let mut out = Vec::new();
+    for step in steps {
+        for line in &step.logs {
+            let lower = line.to_lowercase();
+            if lower.starts_with("warning ")
+                || lower.contains(" warning")
+                || lower.contains("deprecated")
+                || lower.contains("vulnerable")
+            {
+                out.push(line.trim().to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.into_iter().take(10).collect()
 }
 
 fn friendly_step(name: &str) -> String {

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::core::{Step, StepStatus};
 
 const PHASE_ORDER: [&str; 5] = ["detect", "analyze", "restore", "build", "export"];
-const LIFECYCLE_API: &str = "0.20";
+pub const LIFECYCLE_API: &str = "0.20";
 const PLATFORM_API: &str = "0.12";
 
 #[derive(Debug, Serialize)]
