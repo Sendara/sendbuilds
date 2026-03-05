@@ -312,7 +312,9 @@ fn build_container_image(
             .arg("-t")
             .arg(image)
             .arg("--file")
-            .arg(&dockerfile_for_build);
+            .arg(&dockerfile_for_build)
+            .arg("--provenance=mode=max")
+            .arg("--sbom=true");
         if !platforms.is_empty() {
             cmd.arg("--platform").arg(platforms.join(","));
         }

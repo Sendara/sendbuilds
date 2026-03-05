@@ -10,6 +10,8 @@ use std::process::Command;
 use crate::core::{BuildConfig, SecurityConfig};
 use crate::runtime::shell;
 
+const CYCLONEDX_SPEC_VERSION: &str = "1.7";
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SecurityReport {
     pub generated_at: String,
@@ -92,7 +94,7 @@ pub fn run(
 
     let mut sbom = json!({
         "bomFormat": "CycloneDX",
-        "specVersion": "1.5",
+        "specVersion": CYCLONEDX_SPEC_VERSION,
         "version": 1,
         "metadata": {
             "timestamp": Local::now().to_rfc3339(),
@@ -956,7 +958,7 @@ fn generate_sbom_document(build_cfg: &BuildConfig, work_dir: &Path, language: &s
 
     json!({
         "bomFormat": "CycloneDX",
-        "specVersion": "1.5",
+        "specVersion": CYCLONEDX_SPEC_VERSION,
         "version": 1,
         "metadata": {
             "timestamp": Local::now().to_rfc3339(),
