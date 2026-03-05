@@ -148,12 +148,16 @@ fn run_quick_build(
             artifact_dir: "./artifacts".to_string(),
             targets: Some(targets),
             container_image: Some(image_tag),
+            container_platforms: None,
+            push_container: Some(docker),
+            rebase_base: None,
             kubernetes: None,
             gc: None,
         },
         cache: Some(CacheConfig {
             enabled: Some(true),
             dir: None,
+            registry_ref: None,
         }),
         scan: Some(ScanConfig {
             enabled: Some(false),
@@ -177,6 +181,9 @@ fn run_quick_build(
         signing: Some(SigningConfig {
             enabled: Some(true),
             key_env: Some("SENDBUILD_SIGNING_KEY".to_string()),
+            generate_provenance: Some(true),
+            cosign: Some(false),
+            cosign_key: None,
         }),
         compatibility: None,
     };

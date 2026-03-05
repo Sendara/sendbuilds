@@ -97,6 +97,9 @@ output_dir = ".next"                                             # optional over
 artifact_dir = "./artifacts"
 targets = ["directory", "tarball", "serverless_zip", "container_image", "kubernetes"] # optional
 container_image = "my-app:latest"                                       # optional
+container_platforms = ["linux/amd64", "linux/arm64"]                    # optional (buildx)
+push_container = true                                                    # optional (required for multi-arch)
+rebase_base = "gcr.io/distroless/nodejs20-debian12"                     # optional runtime rebase base
 
 [deploy.kubernetes] # optional (used by target="kubernetes")
 enabled = true
@@ -114,6 +117,7 @@ max_age_days = 14
 [cache]
 enabled = true
 dir = "./artifacts/.sendbuild-cache"
+registry_ref = "ghcr.io/your-org/my-app-buildcache" # optional buildx registry cache
 
 [scan]
 enabled = true
@@ -135,6 +139,9 @@ enabled = true
 [signing]
 enabled = true
 key_env = "SENDBUILD_SIGNING_KEY"
+generate_provenance = true
+cosign = false
+# cosign_key = "env://COSIGN_PRIVATE_KEY"
 
 [compatibility]
 target_os = "linux"
@@ -172,6 +179,10 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 10. Automatic artifact garbage collection: optional `[deploy.gc]` retention by count and age after each successful deploy.
 11. Security-First Buildpack (enterprise): auto-generates SBOM (`sbom.json`), runs vulnerability scans during build, enforces critical-CVE build failure policy, auto-switches Dockerfile final base to distroless, and emits `security-report.json` plus `supply-chain-metadata.json`.
 12. CNB lifecycle parity metadata: exports `cnb/lifecycle-contract.json` and `cnb/lifecycle-metadata.json` with standardized detect/analyze/restore/build/export phase mapping.
+13. Layered and rebase-ready container output: generated layered Dockerfiles and `.sendbuild-rebase-plan.json` for runtime-base upgrades.
+14. Registry-backed container cache/export: optional buildx `--cache-from/--cache-to` via `[cache].registry_ref`.
+15. First-class multi-arch container builds: optional `container_platforms` with buildx push flow.
+16. Provenance attestations and cosign integration: emits `provenance.intoto.jsonl`; optional cosign sign/attest.
 
 ## Security scan failure details
 
@@ -191,6 +202,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"security-scan","statu
 - If `[deploy.gc].enabled = true`, old timestamped artifact directories are pruned automatically after deploy.
 - Security-first output is written to artifact root as `sbom.json`, `security-report.json`, and `supply-chain-metadata.json`, and embedded in `build-metrics.json`.
 - CNB lifecycle parity output is written to artifact root under `cnb/lifecycle-contract.json` and `cnb/lifecycle-metadata.json`.
+- Provenance output is written as `provenance.intoto.jsonl` when signing provenance is enabled.
 - If both `[security].enabled` and `[scan].enabled` are true, `security-first` runs and legacy `security-scan` is skipped to avoid duplicate scanning.
 - For Next.js production runtime, prefer `output: "standalone"` and set `output_dir` accordingly.
 

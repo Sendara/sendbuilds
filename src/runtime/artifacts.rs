@@ -30,6 +30,15 @@ pub struct GarbageCollectResult {
 struct ContainerBuildResult {
     dockerfile_generated: bool,
     dockerignore_generated: bool,
+    layered_dockerfile_generated: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContainerPublishOptions {
+    pub platforms: Vec<String>,
+    pub push: bool,
+    pub registry_cache_ref: Option<String>,
+    pub rebase_base: Option<String>,
 }
 
 pub fn make_workdir(project: &str) -> Result<PathBuf> {
@@ -52,6 +61,7 @@ pub fn publish(
     project_name: &str,
     targets: &[String],
     container_image: Option<&str>,
+    container_options: Option<&ContainerPublishOptions>,
     kubernetes: Option<&KubernetesConfig>,
 ) -> Result<PublishResult> {
     let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
@@ -87,12 +97,13 @@ pub fn publish(
             }
             "container" | "container_image" => {
                 let image = container_image.unwrap_or("sendbuild:latest");
-                match build_container_image(container_src, image) {
+                match build_container_image(container_src, image, container_options) {
                     Ok(build_result) => {
                         let out = root.join(format!("container-image-{image}.txt"));
                         let note = format!(
-                            "image={image}\ndockerfile_generated={}\ndockerignore_generated={}\ncontext={}\n",
+                            "image={image}\ndockerfile_generated={}\nlayered_dockerfile_generated={}\ndockerignore_generated={}\ncontext={}\n",
                             build_result.dockerfile_generated,
+                            build_result.layered_dockerfile_generated,
                             build_result.dockerignore_generated,
                             container_src.display()
                         );
@@ -230,7 +241,11 @@ fn zip_dir(
     Ok(())
 }
 
-fn build_container_image(src: &Path, image: &str) -> Result<ContainerBuildResult> {
+fn build_container_image(
+    src: &Path,
+    image: &str,
+    options: Option<&ContainerPublishOptions>,
+) -> Result<ContainerBuildResult> {
     let docker_available = Command::new("docker")
         .arg("--version")
         .output()
@@ -241,7 +256,9 @@ fn build_container_image(src: &Path, image: &str) -> Result<ContainerBuildResult
     }
 
     let dockerfile_path = src.join("Dockerfile");
+    let layered_dockerfile_path = src.join("Dockerfile.sendbuild.layered");
     let mut generated_dockerfile = false;
+    let mut generated_layered_dockerfile = false;
     let generated_dockerignore = ensure_dockerignore(src)?;
     if !dockerfile_path.exists() {
         let dockerfile = build_generated_dockerfile(src)?;
@@ -256,17 +273,182 @@ fn build_container_image(src: &Path, image: &str) -> Result<ContainerBuildResult
         }
     }
 
-    let status = Command::new("docker")
-        .args(["build", "-t", image, "."])
-        .current_dir(src)
-        .status()?;
+    let opts = options.cloned().unwrap_or_default();
+    let use_layered = generated_dockerfile
+        || should_regenerate_generated_dockerfile(
+            &fs::read_to_string(&dockerfile_path).unwrap_or_default(),
+        );
+    let dockerfile_for_build = if use_layered {
+        let layered = build_layered_dockerfile(src, opts.rebase_base.as_deref())?;
+        fs::write(&layered_dockerfile_path, layered)?;
+        generated_layered_dockerfile = true;
+        layered_dockerfile_path.clone()
+    } else {
+        dockerfile_path.clone()
+    };
+
+    let buildx_available = Command::new("docker")
+        .args(["buildx", "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let platforms = opts
+        .platforms
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>();
+    let use_buildx = buildx_available
+        && (!platforms.is_empty() || opts.registry_cache_ref.is_some() || opts.push);
+    if !platforms.is_empty() && !opts.push {
+        anyhow::bail!("multi-arch container build requires [deploy].push_container = true");
+    }
+
+    let status = if use_buildx {
+        let mut cmd = Command::new("docker");
+        cmd.arg("buildx")
+            .arg("build")
+            .arg("-t")
+            .arg(image)
+            .arg("--file")
+            .arg(&dockerfile_for_build);
+        if !platforms.is_empty() {
+            cmd.arg("--platform").arg(platforms.join(","));
+        }
+        if let Some(cache_ref) = opts.registry_cache_ref.as_deref() {
+            cmd.arg("--cache-from")
+                .arg(format!("type=registry,ref={cache_ref}"));
+            cmd.arg("--cache-to")
+                .arg(format!("type=registry,ref={cache_ref},mode=max"));
+        }
+        if opts.push {
+            cmd.arg("--push");
+        } else {
+            cmd.arg("--load");
+        }
+        cmd.arg(".");
+        cmd.current_dir(src).status()?
+    } else {
+        if !platforms.is_empty() || opts.registry_cache_ref.is_some() || opts.push {
+            anyhow::bail!(
+                "docker buildx is required for multi-arch/cache/push container options; install buildx"
+            );
+        }
+        Command::new("docker")
+            .arg("build")
+            .arg("-t")
+            .arg(image)
+            .arg("--file")
+            .arg(&dockerfile_for_build)
+            .arg(".")
+            .current_dir(src)
+            .status()?
+    };
     if !status.success() {
         anyhow::bail!("docker build failed");
     }
+
+    if use_layered {
+        write_rebase_plan(src, image, opts.rebase_base.as_deref(), &platforms)?;
+    }
+
     Ok(ContainerBuildResult {
         dockerfile_generated: generated_dockerfile,
         dockerignore_generated: generated_dockerignore,
+        layered_dockerfile_generated: generated_layered_dockerfile,
     })
+}
+
+fn build_layered_dockerfile(src: &Path, rebase_base: Option<&str>) -> Result<String> {
+    if src.join("package.json").exists() {
+        return build_layered_node_dockerfile(src, rebase_base);
+    }
+    let runtime_base = rebase_base.unwrap_or(infer_runtime_base(src));
+    let (cmd, port) = infer_container_start(src)?;
+    let cmd_json = cmd
+        .iter()
+        .map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![
+        "# sendbuilds: layered rebase-ready dockerfile".to_string(),
+        format!("ARG RUNTIME_BASE={runtime_base}"),
+        "FROM ${RUNTIME_BASE} AS launch".to_string(),
+        "WORKDIR /app".to_string(),
+        "COPY --chown=65532:65532 . /app".to_string(),
+    ];
+    if let Some(p) = port {
+        lines.push(format!("EXPOSE {p}"));
+    }
+    lines.push("USER 65532:65532".to_string());
+    lines.push(format!("CMD [{cmd_json}]"));
+    Ok(lines.join("\n") + "\n")
+}
+
+fn build_layered_node_dockerfile(src: &Path, rebase_base: Option<&str>) -> Result<String> {
+    let runtime_base = rebase_base.unwrap_or("node:20-alpine");
+    let pm = detect_node_package_manager(src);
+    let has_build = has_package_script(src, "build");
+    let start_cmd = infer_node_start_command(src)?;
+    let start_cmd_json = start_cmd
+        .iter()
+        .map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![
+        "# sendbuilds: layered rebase-ready dockerfile".to_string(),
+        format!("ARG RUNTIME_BASE={runtime_base}"),
+        "FROM ${RUNTIME_BASE} AS deps".to_string(),
+        "WORKDIR /app".to_string(),
+        "COPY package.json ./".to_string(),
+    ];
+    if src.join("package-lock.json").exists() {
+        lines.push("COPY package-lock.json ./".to_string());
+    }
+    if src.join("yarn.lock").exists() {
+        lines.push("COPY yarn.lock ./".to_string());
+    }
+    if src.join("pnpm-lock.yaml").exists() {
+        lines.push("COPY pnpm-lock.yaml ./".to_string());
+    }
+    lines.push("RUN corepack enable".to_string());
+    lines.push(format!("RUN {}", install_with_fallback_command(pm, src)));
+    lines.push("FROM deps AS build".to_string());
+    lines.push("COPY . /app".to_string());
+    if has_build {
+        lines.push(format!("RUN {}", build_with_fallback_command(pm)));
+    }
+    lines.push("FROM ${RUNTIME_BASE} AS launch".to_string());
+    lines.push("WORKDIR /app".to_string());
+    lines.push("COPY --from=build --chown=node:node /app /app".to_string());
+    lines.push("EXPOSE 3000".to_string());
+    lines.push("USER node".to_string());
+    lines.push(format!("CMD [{start_cmd_json}]"));
+    Ok(lines.join("\n") + "\n")
+}
+
+fn write_rebase_plan(
+    src: &Path,
+    image: &str,
+    rebase_base: Option<&str>,
+    platforms: &[String],
+) -> Result<()> {
+    let plan = serde_json::json!({
+        "schema_version": "1",
+        "image": image,
+        "runtime_base": rebase_base.unwrap_or("auto"),
+        "platforms": platforms,
+        "strategy": "layered-buildx-rebase-ready",
+        "note": "rebuild launch stage with new runtime_base while reusing cache layers",
+    });
+    fs::write(
+        src.join(".sendbuild-rebase-plan.json"),
+        serde_json::to_vec_pretty(&plan)?,
+    )?;
+    Ok(())
 }
 
 fn infer_runtime_base(src: &Path) -> &'static str {

@@ -352,6 +352,28 @@ impl BuildEngine {
                     let (manifest, sig) = signing::sign_outputs(&p.root, &p.outputs, &key_env)?;
                     step.push_log(format!("manifest {}", manifest.display()));
                     step.push_log(format!("signature {}", sig.display()));
+                    let generate_provenance = cfg
+                        .signing
+                        .as_ref()
+                        .and_then(|s| s.generate_provenance)
+                        .unwrap_or(true);
+                    if generate_provenance {
+                        let provenance = signing::write_provenance(
+                            &p.root,
+                            &p.outputs,
+                            &signing::ProvenanceOptions {
+                                project_name: cfg.project.name.clone(),
+                                container_image: cfg.deploy.container_image.clone(),
+                                cosign: cfg
+                                    .signing
+                                    .as_ref()
+                                    .and_then(|s| s.cosign)
+                                    .unwrap_or(false),
+                                cosign_key: cfg.signing.as_ref().and_then(|s| s.cosign_key.clone()),
+                            },
+                        )?;
+                        step.push_log(format!("provenance {}", provenance.display()));
+                    }
                 }
                 Ok(())
             })?,
@@ -951,6 +973,22 @@ impl BuildEngine {
             .targets
             .clone()
             .unwrap_or_else(|| vec!["directory".to_string()]);
+        let registry_cache_ref = self
+            .config
+            .cache
+            .as_ref()
+            .and_then(|c| c.registry_ref.clone());
+        let container_options = artifacts::ContainerPublishOptions {
+            platforms: self
+                .config
+                .deploy
+                .container_platforms
+                .clone()
+                .unwrap_or_default(),
+            push: self.config.deploy.push_container.unwrap_or(false),
+            registry_cache_ref,
+            rebase_base: self.config.deploy.rebase_base.clone(),
+        };
         let published = artifacts::publish(
             &output_src,
             &ctx.work_dir,
@@ -958,6 +996,7 @@ impl BuildEngine {
             &self.config.project.name,
             &targets,
             self.config.deploy.container_image.as_deref(),
+            Some(&container_options),
             self.config.deploy.kubernetes.as_ref(),
         )?;
         step.push_log(format!("artifact root {}", published.root.display()));

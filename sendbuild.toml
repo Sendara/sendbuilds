@@ -18,6 +18,9 @@ name     = "test"
 artifact_dir = "./artifacts"
 # targets = ["static_site", "tarball", "serverless_function", "container_image", "kubernetes"]
 # container_image = "sendara-landing:latest"
+# container_platforms = ["linux/amd64", "linux/arm64"]
+# push_container = false
+# rebase_base = "gcr.io/distroless/nodejs20-debian12"
 
 # [deploy.kubernetes]
 # enabled = true
@@ -35,6 +38,7 @@ artifact_dir = "./artifacts"
 [cache]
 enabled = true
 dir = "./artifacts/.sendbuild-cache"
+# registry_ref = "ghcr.io/your-org/your-app-buildcache"
 
 [scan]
 enabled = false
@@ -55,6 +59,9 @@ enabled = true
 [signing]
 enabled = false
 key_env = "SENDBUILD_SIGNING_KEY"
+# generate_provenance = true
+# cosign = false
+# cosign_key = "env://COSIGN_PRIVATE_KEY"
 
 env_from_host = ["GITHUB_TOKEN"]
 

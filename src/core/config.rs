@@ -46,6 +46,9 @@ pub struct DeployConfig {
     pub artifact_dir: String,
     pub targets: Option<Vec<String>>,
     pub container_image: Option<String>,
+    pub container_platforms: Option<Vec<String>>,
+    pub push_container: Option<bool>,
+    pub rebase_base: Option<String>,
     pub kubernetes: Option<KubernetesConfig>,
     pub gc: Option<GarbageCollectionConfig>,
 }
@@ -71,6 +74,7 @@ pub struct GarbageCollectionConfig {
 pub struct CacheConfig {
     pub enabled: Option<bool>,
     pub dir: Option<String>,
+    pub registry_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -100,6 +104,9 @@ pub struct SandboxConfig {
 pub struct SigningConfig {
     pub enabled: Option<bool>,
     pub key_env: Option<String>,
+    pub generate_provenance: Option<bool>,
+    pub cosign: Option<bool>,
+    pub cosign_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -136,6 +143,9 @@ impl BuildConfig {
                 artifact_dir: "./artifacts".to_string(),
                 targets: Some(vec!["directory".to_string()]),
                 container_image: None,
+                container_platforms: None,
+                push_container: None,
+                rebase_base: None,
                 kubernetes: None,
                 gc: None,
             },
