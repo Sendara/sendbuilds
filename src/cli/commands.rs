@@ -199,6 +199,10 @@ fn run_quick_build(
             generate_provenance: Some(true),
             cosign: Some(false),
             cosign_key: None,
+            cosign_keyless: None,
+            verify_after_sign: None,
+            verify_certificate_identity: None,
+            verify_certificate_oidc_issuer: None,
         }),
         compatibility: None,
     };

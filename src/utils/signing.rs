@@ -28,6 +28,10 @@ pub struct ProvenanceOptions {
     pub container_image: Option<String>,
     pub cosign: bool,
     pub cosign_key: Option<String>,
+    pub cosign_keyless: bool,
+    pub verify_after_sign: bool,
+    pub verify_certificate_identity: Option<String>,
+    pub verify_certificate_oidc_issuer: Option<String>,
 }
 
 pub fn sign_outputs(
@@ -112,11 +116,68 @@ pub fn write_provenance(
         let image = options.container_image.as_deref().ok_or_else(|| {
             anyhow::anyhow!("cosign enabled but deploy.container_image is not set")
         })?;
-        run_cosign_sign(image, options.cosign_key.as_deref())?;
-        run_cosign_attest(image, &out, options.cosign_key.as_deref())?;
+        run_cosign_sign(image, options)?;
+        run_cosign_attest(image, &out, options)?;
+        if options.verify_after_sign {
+            run_cosign_verify(image, options)?;
+            run_cosign_verify_attestation(image, options)?;
+        }
     }
 
     Ok(out)
+}
+
+pub fn sign_manifest_with_cosign(
+    manifest_path: &Path,
+    options: &ProvenanceOptions,
+) -> Result<Option<(PathBuf, PathBuf)>> {
+    if !options.cosign {
+        return Ok(None);
+    }
+    ensure_cosign_available()?;
+    let sig_path = manifest_path.with_extension("cosign.sig");
+    let cert_path = manifest_path.with_extension("cosign.crt");
+    let mut cmd = Command::new("cosign");
+    cmd.arg("sign-blob")
+        .arg("--yes")
+        .arg("--output-signature")
+        .arg(&sig_path)
+        .arg("--output-certificate")
+        .arg(&cert_path);
+    apply_cosign_signing_flags(&mut cmd, options);
+    let status = cmd.arg(manifest_path).status()?;
+    if !status.success() {
+        bail!(
+            "cosign sign-blob failed for artifact manifest {}",
+            manifest_path.display()
+        );
+    }
+    Ok(Some((sig_path, cert_path)))
+}
+
+pub fn verify_manifest_with_cosign(
+    manifest_path: &Path,
+    sig_path: &Path,
+    cert_path: Option<&Path>,
+    options: &ProvenanceOptions,
+) -> Result<()> {
+    if !options.cosign || !options.verify_after_sign {
+        return Ok(());
+    }
+    ensure_cosign_available()?;
+    let mut cmd = Command::new("cosign");
+    cmd.arg("verify-blob")
+        .arg("--signature")
+        .arg(sig_path);
+    apply_cosign_verify_blob_flags(&mut cmd, cert_path, options)?;
+    let status = cmd.arg(manifest_path).status()?;
+    if !status.success() {
+        bail!(
+            "cosign verify-blob failed for artifact manifest {}",
+            manifest_path.display()
+        );
+    }
+    Ok(())
 }
 
 fn collect_hashes(root: &Path, path: &Path, entries: &mut Vec<SignedEntry>) -> Result<()> {
@@ -366,15 +427,11 @@ fn byproducts(output_root: &Path) -> Vec<serde_json::Value> {
     out
 }
 
-fn run_cosign_sign(image: &str, key: Option<&str>) -> Result<()> {
+fn run_cosign_sign(image: &str, options: &ProvenanceOptions) -> Result<()> {
     ensure_cosign_available()?;
     let mut cmd = Command::new("cosign");
     cmd.arg("sign").arg("--yes");
-    if let Some(k) = key {
-        cmd.arg("--key").arg(k);
-    } else {
-        cmd.arg("--key").arg("env://COSIGN_PRIVATE_KEY");
-    }
+    apply_cosign_signing_flags(&mut cmd, options);
     let status = cmd.arg(image).status()?;
     if !status.success() {
         bail!("cosign sign failed for image {image}");
@@ -382,7 +439,7 @@ fn run_cosign_sign(image: &str, key: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn run_cosign_attest(image: &str, predicate_path: &Path, key: Option<&str>) -> Result<()> {
+fn run_cosign_attest(image: &str, predicate_path: &Path, options: &ProvenanceOptions) -> Result<()> {
     ensure_cosign_available()?;
     let mut cmd = Command::new("cosign");
     cmd.arg("attest")
@@ -391,14 +448,118 @@ fn run_cosign_attest(image: &str, predicate_path: &Path, key: Option<&str>) -> R
         .arg(predicate_path)
         .arg("--type")
         .arg("slsaprovenance");
-    if let Some(k) = key {
+    apply_cosign_signing_flags(&mut cmd, options);
+    let status = cmd.arg(image).status()?;
+    if !status.success() {
+        bail!("cosign attest failed for image {image}");
+    }
+    Ok(())
+}
+
+fn run_cosign_verify(image: &str, options: &ProvenanceOptions) -> Result<()> {
+    ensure_cosign_available()?;
+    let mut cmd = Command::new("cosign");
+    cmd.arg("verify");
+    apply_cosign_verify_identity_or_key_flags(&mut cmd, options)?;
+    let status = cmd.arg(image).status()?;
+    if !status.success() {
+        bail!("cosign verify failed for image {image}");
+    }
+    Ok(())
+}
+
+fn run_cosign_verify_attestation(image: &str, options: &ProvenanceOptions) -> Result<()> {
+    ensure_cosign_available()?;
+    let mut cmd = Command::new("cosign");
+    cmd.arg("verify-attestation")
+        .arg("--type")
+        .arg("slsaprovenance");
+    apply_cosign_verify_identity_or_key_flags(&mut cmd, options)?;
+    let status = cmd.arg(image).status()?;
+    if !status.success() {
+        bail!("cosign verify-attestation failed for image {image}");
+    }
+    Ok(())
+}
+
+fn apply_cosign_signing_flags(cmd: &mut Command, options: &ProvenanceOptions) {
+    if options.cosign_keyless {
+        cmd.arg("--keyless");
+    } else if let Some(k) = options.cosign_key.as_deref() {
         cmd.arg("--key").arg(k);
     } else {
         cmd.arg("--key").arg("env://COSIGN_PRIVATE_KEY");
     }
-    let status = cmd.arg(image).status()?;
-    if !status.success() {
-        bail!("cosign attest failed for image {image}");
+}
+
+fn apply_cosign_verify_identity_or_key_flags(
+    cmd: &mut Command,
+    options: &ProvenanceOptions,
+) -> Result<()> {
+    if options.cosign_keyless {
+        let identity = options.verify_certificate_identity.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cosign keyless verification requires signing.verify_certificate_identity"
+            )
+        })?;
+        let issuer = options
+            .verify_certificate_oidc_issuer
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cosign keyless verification requires signing.verify_certificate_oidc_issuer"
+                )
+            })?;
+        cmd.arg("--certificate-identity")
+            .arg(identity)
+            .arg("--certificate-oidc-issuer")
+            .arg(issuer);
+        return Ok(());
+    }
+
+    if let Some(k) = options.cosign_key.as_deref() {
+        cmd.arg("--key").arg(k);
+    } else {
+        cmd.arg("--key").arg("env://COSIGN_PUBLIC_KEY");
+    }
+    Ok(())
+}
+
+fn apply_cosign_verify_blob_flags(
+    cmd: &mut Command,
+    cert_path: Option<&Path>,
+    options: &ProvenanceOptions,
+) -> Result<()> {
+    if options.cosign_keyless {
+        let cert = cert_path.ok_or_else(|| {
+            anyhow::anyhow!("cosign keyless blob verification requires a certificate path")
+        })?;
+        let identity = options.verify_certificate_identity.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cosign keyless verification requires signing.verify_certificate_identity"
+            )
+        })?;
+        let issuer = options
+            .verify_certificate_oidc_issuer
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cosign keyless verification requires signing.verify_certificate_oidc_issuer"
+                )
+            })?;
+        cmd.arg("--certificate")
+            .arg(cert)
+            .arg("--certificate-identity")
+            .arg(identity)
+            .arg("--certificate-oidc-issuer")
+            .arg(issuer);
+        return Ok(());
+    }
+
+    if let Some(k) = options.cosign_key.as_deref() {
+        cmd.arg("--key").arg(k);
+    } else {
+        cmd.arg("--key").arg("env://COSIGN_PUBLIC_KEY");
     }
     Ok(())
 }

@@ -390,9 +390,52 @@ impl BuildEngine {
                     .and_then(|s| s.key_env.clone())
                     .unwrap_or_else(|| "SENDBUILD_SIGNING_KEY".to_string());
                 if let Some(p) = &publish_result {
+                    let provenance_options = signing::ProvenanceOptions {
+                        project_name: cfg.project.name.clone(),
+                        container_image: cfg.deploy.container_image.clone(),
+                        cosign: cfg
+                            .signing
+                            .as_ref()
+                            .and_then(|s| s.cosign)
+                            .unwrap_or(false),
+                        cosign_key: cfg.signing.as_ref().and_then(|s| s.cosign_key.clone()),
+                        cosign_keyless: cfg
+                            .signing
+                            .as_ref()
+                            .and_then(|s| s.cosign_keyless)
+                            .unwrap_or(false),
+                        verify_after_sign: cfg
+                            .signing
+                            .as_ref()
+                            .and_then(|s| s.verify_after_sign)
+                            .unwrap_or(false),
+                        verify_certificate_identity: cfg
+                            .signing
+                            .as_ref()
+                            .and_then(|s| s.verify_certificate_identity.clone()),
+                        verify_certificate_oidc_issuer: cfg
+                            .signing
+                            .as_ref()
+                            .and_then(|s| s.verify_certificate_oidc_issuer.clone()),
+                    };
                     let (manifest, sig) = signing::sign_outputs(&p.root, &p.outputs, &key_env)?;
                     step.push_log(format!("manifest {}", manifest.display()));
                     step.push_log(format!("signature {}", sig.display()));
+                    if let Some((cosign_sig, cosign_cert)) =
+                        signing::sign_manifest_with_cosign(&manifest, &provenance_options)?
+                    {
+                        step.push_log(format!("cosign_blob_signature {}", cosign_sig.display()));
+                        step.push_log(format!("cosign_blob_certificate {}", cosign_cert.display()));
+                        signing::verify_manifest_with_cosign(
+                            &manifest,
+                            &cosign_sig,
+                            Some(&cosign_cert),
+                            &provenance_options,
+                        )?;
+                        if provenance_options.verify_after_sign {
+                            step.push_log("cosign blob verification passed".to_string());
+                        }
+                    }
                     let generate_provenance = cfg
                         .signing
                         .as_ref()
@@ -402,18 +445,12 @@ impl BuildEngine {
                         let provenance = signing::write_provenance(
                             &p.root,
                             &p.outputs,
-                            &signing::ProvenanceOptions {
-                                project_name: cfg.project.name.clone(),
-                                container_image: cfg.deploy.container_image.clone(),
-                                cosign: cfg
-                                    .signing
-                                    .as_ref()
-                                    .and_then(|s| s.cosign)
-                                    .unwrap_or(false),
-                                cosign_key: cfg.signing.as_ref().and_then(|s| s.cosign_key.clone()),
-                            },
+                            &provenance_options,
                         )?;
                         step.push_log(format!("provenance {}", provenance.display()));
+                        if provenance_options.verify_after_sign && provenance_options.cosign {
+                            step.push_log("cosign image verification passed".to_string());
+                        }
                     }
                 }
                 Ok(())

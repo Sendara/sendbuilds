@@ -115,6 +115,10 @@ pub struct SigningConfig {
     pub generate_provenance: Option<bool>,
     pub cosign: Option<bool>,
     pub cosign_key: Option<String>,
+    pub cosign_keyless: Option<bool>,
+    pub verify_after_sign: Option<bool>,
+    pub verify_certificate_identity: Option<String>,
+    pub verify_certificate_oidc_issuer: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
