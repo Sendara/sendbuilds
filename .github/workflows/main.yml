@@ -67,30 +67,36 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package release asset
+      - name: Package release asset (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $pkgDir = "dist\package"
+          if (Test-Path $pkgDir) { Remove-Item -Recurse -Force $pkgDir }
+          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+
+          Copy-Item "target/${{ matrix.target }}/release/sendbuilds.exe" "$pkgDir/sendbuilds.exe"
+          Copy-Item "scripts/install-windows.ps1" "$pkgDir/install.ps1"
+
+          Compress-Archive -Path "$pkgDir\*" -DestinationPath "dist\${{ matrix.asset_name }}" -Force
+          $h = (Get-FileHash -Algorithm SHA256 "dist\${{ matrix.asset_name }}").Hash.ToLower()
+          "$h  ${{ matrix.asset_name }}" | Out-File -Encoding ascii "dist\${{ matrix.asset_name }}.sha256"
+
+      - name: Package release asset (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
           PKG_DIR="dist/package"
           rm -rf "$PKG_DIR"
           mkdir -p "$PKG_DIR"
-          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
-            cp "target/${{ matrix.target }}/release/sendbuilds.exe" "$PKG_DIR/sendbuilds.exe"
-            cp "scripts/install-windows.ps1" "$PKG_DIR/install.ps1"
-            powershell -NoProfile -Command "Compress-Archive -Path '$PKG_DIR\\*' -DestinationPath 'dist\\${{ matrix.asset_name }}' -Force"
-          else
-            cp "target/${{ matrix.target }}/release/sendbuilds" "$PKG_DIR/sendbuilds"
-            cp "scripts/install-unix.sh" "$PKG_DIR/install.sh"
-            chmod +x "$PKG_DIR/sendbuilds" "$PKG_DIR/install.sh"
-            tar -C "$PKG_DIR" -czf "dist/${{ matrix.asset_name }}" .
-          fi
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 'dist\\${{ matrix.asset_name }}').Hash.ToLower(); '$h  ${{ matrix.asset_name }}' | Out-File -Encoding ascii 'dist\\${{ matrix.asset_name }}.sha256'"
-          else
-            HASH="$(openssl dgst -sha256 "dist/${{ matrix.asset_name }}" | awk '{print $NF}')"
-            printf "%s  %s\n" "$HASH" "${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
-          fi
-          rm -rf "$PKG_DIR"
+          cp "target/${{ matrix.target }}/release/sendbuilds" "$PKG_DIR/sendbuilds"
+          cp "scripts/install-unix.sh" "$PKG_DIR/install.sh"
+          chmod +x "$PKG_DIR/sendbuilds" "$PKG_DIR/install.sh"
+          tar -C "$PKG_DIR" -czf "dist/${{ matrix.asset_name }}" .
+          HASH="$(openssl dgst -sha256 "dist/${{ matrix.asset_name }}" | awk '{print $NF}')"
+          printf "%s  %s\n" "$HASH" "${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
 
       - name: Upload Release
         uses: softprops/action-gh-release@v2
