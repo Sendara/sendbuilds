@@ -324,10 +324,44 @@ fn generate_and_store_signing_key(path: &Path) -> Result<String> {
             })?;
         }
     }
-    fs::write(path, format!("{key}\n"))
-        .with_context(|| format!("failed to write signing key file: {}", path.display()))?;
+    write_signing_key(path, &key)?;
 
     Ok(key)
+}
+
+fn write_signing_key(path: &Path, key: &str) -> Result<()> {
+    let content = format!("{key}\n");
+
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to write signing key file: {}", path.display()))?;
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("failed to write signing key file: {}", path.display()))?;
+        file.flush()
+            .with_context(|| format!("failed to flush signing key file: {}", path.display()))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to set secure permissions on signing key file: {}",
+                path.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content)
+            .with_context(|| format!("failed to write signing key file: {}", path.display()))?;
+        Ok(())
+    }
 }
 
 fn init_project(template: Option<&str>, _yes: bool) -> Result<()> {

@@ -302,12 +302,14 @@ pub fn run_container_image_scan(
     let candidates = [
         (
             "trivy-image",
-            format!(
-                "trivy image --quiet --format json --scanners vuln,misconfig,secret {image}"
-            ),
+            format!("trivy image --quiet --format json --scanners vuln,misconfig,secret {image}"),
             ScanParser::Trivy,
         ),
-        ("grype-image", format!("grype {image} -o json"), ScanParser::GenericJson),
+        (
+            "grype-image",
+            format!("grype {image} -o json"),
+            ScanParser::GenericJson,
+        ),
     ];
 
     let mut attempts = Vec::new();
@@ -532,6 +534,11 @@ fn run_vulnerability_scan(
             ..Default::default()
         };
         parse_scan_output(candidate.parser, &run.logs, &mut summary);
+        let has_findings = summary_has_findings(&summary);
+        if !run.success && !has_findings {
+            unavailable.push(format!("{}(command-failed)", candidate.scanner));
+            continue;
+        }
         if summary.packages.is_empty() {
             summary.packages = extract_package_names(&run.logs);
         }
@@ -569,6 +576,19 @@ fn run_vulnerability_scan(
             .collect(),
         ..Default::default()
     })
+}
+
+fn summary_has_findings(summary: &VulnerabilitySummary) -> bool {
+    summary.total > 0
+        || summary.critical > 0
+        || summary.high > 0
+        || summary.moderate > 0
+        || summary.low > 0
+        || summary.info > 0
+        || summary.misconfigurations > 0
+        || summary.secrets > 0
+        || !summary.packages.is_empty()
+        || !summary.detailed_findings.is_empty()
 }
 
 fn scanner_expected_for_language(language: &str) -> bool {
@@ -904,9 +924,7 @@ fn render_npm_findings(vulns: &serde_json::Map<String, Value>, max_packages: usi
         let upgrade = npm_upgrade_hint(name, info);
         let vulnerabilities = npm_cve_lines(info, 6);
 
-        let mut entry = format!(
-            "{name}\n  Source: {source}\n  Severity: {severity}\n  {upgrade}"
-        );
+        let mut entry = format!("{name}\n  Source: {source}\n  Severity: {severity}\n  {upgrade}");
         if !vulnerabilities.is_empty() {
             entry.push_str("\n\n  Vulnerabilities:");
             for line in vulnerabilities {
@@ -951,18 +969,23 @@ fn npm_cve_lines(info: &Value, max_items: usize) -> Vec<String> {
             .get("source")
             .and_then(Value::as_str)
             .map(ToString::to_string)
-            .or_else(|| obj.get("name").and_then(Value::as_str).map(ToString::to_string))
-            .or_else(|| obj.get("title").and_then(Value::as_str).map(ToString::to_string))
+            .or_else(|| {
+                obj.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .or_else(|| {
+                obj.get("title")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
             .unwrap_or_else(|| "advisory".to_string());
         let sev = obj
             .get("severity")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_uppercase();
-        let url = obj
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or("no-url");
+        let url = obj.get("url").and_then(Value::as_str).unwrap_or("no-url");
         out.push(format!("{id} ({sev}): {url}"));
     }
     out
@@ -1629,7 +1652,9 @@ fn normalize_language(language: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_json, normalize_language, to_u32};
+    use super::{
+        collect_json, normalize_language, summary_has_findings, to_u32, VulnerabilitySummary,
+    };
     use serde_json::json;
 
     #[test]
@@ -1661,5 +1686,20 @@ mod tests {
     #[test]
     fn normalize_language_maps_alias() {
         assert_eq!(normalize_language("golang"), "go");
+    }
+
+    #[test]
+    fn summary_has_findings_detects_empty_summary() {
+        let summary = VulnerabilitySummary::default();
+        assert!(!summary_has_findings(&summary));
+    }
+
+    #[test]
+    fn summary_has_findings_detects_nonempty_summary() {
+        let summary = VulnerabilitySummary {
+            high: 1,
+            ..Default::default()
+        };
+        assert!(summary_has_findings(&summary));
     }
 }
