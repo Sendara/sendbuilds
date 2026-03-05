@@ -69,6 +69,9 @@ pub fn run(
     let generate_sbom = config.and_then(|c| c.generate_sbom).unwrap_or(true);
     let fail_on_critical = config.and_then(|c| c.fail_on_critical).unwrap_or(true);
     let critical_threshold = config.and_then(|c| c.critical_threshold).unwrap_or(0);
+    let fail_on_scanner_unavailable = config
+        .and_then(|c| c.fail_on_scanner_unavailable)
+        .unwrap_or(true);
     let auto_distroless = config.and_then(|c| c.auto_distroless).unwrap_or(true);
     let distroless_base = config.and_then(|c| c.distroless_base.clone());
     let rewrite_in_place = config
@@ -113,6 +116,13 @@ pub fn run(
             "vulnerability scanner unavailable for language={} scanner={}",
             normalized, report.vulnerability_scan.scanner
         ));
+        if fail_on_scanner_unavailable && scanner_expected_for_language(&normalized) {
+            bail!(
+                "security policy violation: required scanner unavailable for language={} scanner={}",
+                normalized,
+                report.vulnerability_scan.scanner
+            );
+        }
     }
     report.distroless = maybe_switch_to_distroless(
         &normalized,
@@ -306,6 +316,10 @@ fn command_available(bin: &str, args: &[&str]) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn scanner_expected_for_language(language: &str) -> bool {
+    matches!(language, "nodejs" | "python" | "rust")
 }
 
 fn maybe_switch_to_distroless(

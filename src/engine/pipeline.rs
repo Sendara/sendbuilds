@@ -453,8 +453,14 @@ impl BuildEngine {
         let parallel_build_cmds = cfg
             .and_then(|b| b.parallel_build_cmds.clone())
             .unwrap_or_default();
-        step.push_log(format!("install_cmd={install_cmd}"));
-        step.push_log(format!("build_cmd={build_cmd}"));
+        step.push_log(format!(
+            "install_cmd={}",
+            shell::redact_command_for_log(&install_cmd)
+        ));
+        step.push_log(format!(
+            "build_cmd={}",
+            shell::redact_command_for_log(&build_cmd)
+        ));
         step.push_log(format!(
             "output_dir={}",
             output_dir
@@ -574,7 +580,11 @@ impl BuildEngine {
         let candidates = self.install_fallback_candidates(cmd);
         let mut failures = Vec::new();
         for (i, c) in candidates.iter().enumerate() {
-            step.push_log(format!("install attempt {} {}", i + 1, c));
+            step.push_log(format!(
+                "install attempt {} {}",
+                i + 1,
+                shell::redact_command_for_log(c)
+            ));
             let run = shell::run_allow_failure(c, wd, env, sandbox)?;
             for line in &run.logs {
                 step.push_log(line.clone());
@@ -589,7 +599,7 @@ impl BuildEngine {
             failures.push(format!(
                 "attempt {} cmd=`{}` exit={:?}{}",
                 i + 1,
-                c,
+                shell::redact_command_for_log(c),
                 run.exit_code,
                 hint
             ));
@@ -872,7 +882,10 @@ impl BuildEngine {
 
     fn step_source(&self, ctx: &BuildContext, step: &mut Step) -> Result<()> {
         if let Some(src) = &self.config.source {
-            step.push_log(format!("clone repo {}", src.repo));
+            step.push_log(format!(
+                "clone repo {}",
+                shell::redact_command_for_log(&src.repo)
+            ));
             git::clone(&src.repo, &ctx.work_dir)?;
             if let Some(commit) = &src.commit {
                 git::fetch_and_checkout(&ctx.work_dir, commit)?;

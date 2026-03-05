@@ -26,6 +26,12 @@ pub struct GarbageCollectResult {
     pub kept_dirs: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ContainerBuildResult {
+    dockerfile_generated: bool,
+    dockerignore_generated: bool,
+}
+
 pub fn make_workdir(project: &str) -> Result<PathBuf> {
     let stamp = Local::now().format("%Y%m%d_%H%M%S%3f");
     let dir = std::env::temp_dir()
@@ -82,10 +88,12 @@ pub fn publish(
             "container" | "container_image" => {
                 let image = container_image.unwrap_or("sendbuild:latest");
                 match build_container_image(container_src, image) {
-                    Ok(generated_dockerfile) => {
+                    Ok(build_result) => {
                         let out = root.join(format!("container-image-{image}.txt"));
                         let note = format!(
-                            "image={image}\ndockerfile_generated={generated_dockerfile}\ncontext={}\n",
+                            "image={image}\ndockerfile_generated={}\ndockerignore_generated={}\ncontext={}\n",
+                            build_result.dockerfile_generated,
+                            build_result.dockerignore_generated,
                             container_src.display()
                         );
                         fs::write(&out, note)?;
@@ -222,7 +230,7 @@ fn zip_dir(
     Ok(())
 }
 
-fn build_container_image(src: &Path, image: &str) -> Result<bool> {
+fn build_container_image(src: &Path, image: &str) -> Result<ContainerBuildResult> {
     let docker_available = Command::new("docker")
         .arg("--version")
         .output()
@@ -234,6 +242,7 @@ fn build_container_image(src: &Path, image: &str) -> Result<bool> {
 
     let dockerfile_path = src.join("Dockerfile");
     let mut generated_dockerfile = false;
+    let generated_dockerignore = ensure_dockerignore(src)?;
     if !dockerfile_path.exists() {
         let dockerfile = build_generated_dockerfile(src)?;
         fs::write(&dockerfile_path, dockerfile)?;
@@ -254,7 +263,10 @@ fn build_container_image(src: &Path, image: &str) -> Result<bool> {
     if !status.success() {
         anyhow::bail!("docker build failed");
     }
-    Ok(generated_dockerfile)
+    Ok(ContainerBuildResult {
+        dockerfile_generated: generated_dockerfile,
+        dockerignore_generated: generated_dockerignore,
+    })
 }
 
 fn infer_runtime_base(src: &Path) -> &'static str {
@@ -320,11 +332,12 @@ fn build_generated_dockerfile(src: &Path) -> Result<String> {
         "# sendbuilds: auto-generated dockerfile".to_string(),
         format!("FROM {base}"),
         "WORKDIR /app".to_string(),
-        "COPY . /app".to_string(),
+        "COPY --chown=65532:65532 . /app".to_string(),
     ];
     if let Some(p) = port {
         lines.push(format!("EXPOSE {p}"));
     }
+    lines.push("USER 65532:65532".to_string());
     lines.push(format!("CMD [{cmd_json}]"));
     Ok(lines.join("\n") + "\n")
 }
@@ -343,7 +356,7 @@ fn build_generated_node_dockerfile(src: &Path) -> Result<String> {
         "# sendbuilds: auto-generated dockerfile".to_string(),
         "FROM node:20-alpine".to_string(),
         "WORKDIR /app".to_string(),
-        "COPY . /app".to_string(),
+        "COPY --chown=node:node . /app".to_string(),
         "RUN corepack enable".to_string(),
         format!(
             "RUN {}",
@@ -357,8 +370,35 @@ fn build_generated_node_dockerfile(src: &Path) -> Result<String> {
         ));
     }
     lines.push("EXPOSE 3000".to_string());
+    lines.push("USER node".to_string());
     lines.push(format!("CMD [{start_cmd_json}]"));
     Ok(lines.join("\n") + "\n")
+}
+
+fn ensure_dockerignore(src: &Path) -> Result<bool> {
+    let dockerignore = src.join(".dockerignore");
+    if dockerignore.exists() {
+        return Ok(false);
+    }
+    let rules = [
+        ".git",
+        ".gitignore",
+        ".env",
+        ".env.*",
+        "*.pem",
+        "*.key",
+        "*.p12",
+        "*.kubeconfig",
+        "node_modules",
+        "target",
+        "artifacts",
+        ".sendbuild-cache",
+        ".venv",
+        "venv",
+        "__pycache__",
+    ];
+    fs::write(dockerignore, rules.join("\n") + "\n")?;
+    Ok(true)
 }
 
 fn infer_node_start_command(src: &Path) -> Result<Vec<String>> {

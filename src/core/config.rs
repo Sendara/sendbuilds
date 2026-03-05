@@ -84,6 +84,7 @@ pub struct SecurityConfig {
     pub enabled: Option<bool>,
     pub fail_on_critical: Option<bool>,
     pub critical_threshold: Option<u32>,
+    pub fail_on_scanner_unavailable: Option<bool>,
     pub generate_sbom: Option<bool>,
     pub auto_distroless: Option<bool>,
     pub distroless_base: Option<String>,

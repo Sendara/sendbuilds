@@ -1,10 +1,9 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::config::{
     CacheConfig, DeployConfig, ProjectConfig, SandboxConfig, ScanConfig, SecurityConfig,
@@ -132,7 +131,7 @@ fn run_quick_build(
         targets.push("container_image".to_string());
     }
 
-    ensure_signing_key("SENDBUILD_SIGNING_KEY_AUTO");
+    ensure_signing_key("SENDBUILD_SIGNING_KEY")?;
 
     let cfg = BuildConfig {
         project: ProjectConfig {
@@ -164,6 +163,7 @@ fn run_quick_build(
             enabled: Some(true),
             fail_on_critical: Some(true),
             critical_threshold: Some(0),
+            fail_on_scanner_unavailable: Some(true),
             generate_sbom: Some(true),
             auto_distroless: Some(true),
             distroless_base: None,
@@ -176,7 +176,7 @@ fn run_quick_build(
         }),
         signing: Some(SigningConfig {
             enabled: Some(true),
-            key_env: Some("SENDBUILD_SIGNING_KEY_AUTO".to_string()),
+            key_env: Some("SENDBUILD_SIGNING_KEY".to_string()),
         }),
         compatibility: None,
     };
@@ -217,16 +217,13 @@ fn project_name_from_repo(repo: &str) -> String {
     }
 }
 
-fn ensure_signing_key(key_env: &str) {
-    if env::var(key_env).is_ok() {
-        return;
+fn ensure_signing_key(key_env: &str) -> Result<()> {
+    let value = env::var(key_env)
+        .with_context(|| format!("missing required signing key env: {key_env}"))?;
+    if value.trim().len() < 32 {
+        bail!("signing key env `{key_env}` must be at least 32 characters");
     }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    env::set_var(key_env, format!("sendbuilds-auto-key-{pid}-{nanos}"));
+    Ok(())
 }
 
 fn init_project(template: Option<&str>, _yes: bool) -> Result<()> {

