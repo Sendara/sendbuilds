@@ -252,23 +252,3 @@ cargo test
 ## CI
 
 GitHub Actions CI runs on push and pull requests. It validates formatting, compilation, tests, and release build output for Linux and Windows.
-
-## Container CI (Buildx + Cosign)
-
-Two ready-to-use workflows are included:
-
-1. `.github/workflows/container-buildx-cosign-keyless.yml`
-- Uses OIDC keyless cosign signing/attestation.
-- Requires `packages: write` and `id-token: write` permissions.
-- Pushes multi-arch image (`linux/amd64,linux/arm64`) and registry cache.
-
-2. `.github/workflows/container-buildx-cosign-key.yml`
-- Uses key-based cosign signing/attestation.
-- Requires repository secrets:
-  - `COSIGN_PRIVATE_KEY`
-  - `COSIGN_PASSWORD`
-- Pushes multi-arch image and registry cache.
-
-Both workflows use Docker Buildx with:
-- `cache-from: type=registry`
-- `cache-to: type=registry,mode=max`
