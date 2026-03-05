@@ -19,23 +19,28 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: sendbuilds-linux-x86_64
+            asset_name: sendbuilds-linux-x86_64.tar.gz
+            binary_name: sendbuilds
 
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            name: sendbuilds-linux-aarch64
+            asset_name: sendbuilds-linux-aarch64.tar.gz
+            binary_name: sendbuilds
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            name: sendbuilds-windows-x86_64.exe
+            asset_name: sendbuilds-windows-x86_64.zip
+            binary_name: sendbuilds.exe
 
           - os: macos-latest
             target: x86_64-apple-darwin
-            name: sendbuilds-macos-x86_64
+            asset_name: sendbuilds-macos-x86_64.tar.gz
+            binary_name: sendbuilds
 
           - os: macos-latest
             target: aarch64-apple-darwin
-            name: sendbuilds-macos-aarch64
+            asset_name: sendbuilds-macos-aarch64.tar.gz
+            binary_name: sendbuilds
 
     steps:
       - name: Checkout
@@ -62,17 +67,29 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Rename binary
+      - name: Package release asset
         shell: bash
         run: |
           mkdir -p dist
+          PKG_DIR="dist/package"
+          rm -rf "$PKG_DIR"
+          mkdir -p "$PKG_DIR"
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
-            cp "target/${{ matrix.target }}/release/sendbuilds.exe" "dist/${{ matrix.name }}"
+            cp "target/${{ matrix.target }}/release/sendbuilds.exe" "$PKG_DIR/sendbuilds.exe"
+            cp "scripts/install-windows.ps1" "$PKG_DIR/install.ps1"
+            powershell -NoProfile -Command "Compress-Archive -Path '$PKG_DIR\\*' -DestinationPath 'dist\\${{ matrix.asset_name }}' -Force"
           else
-            cp "target/${{ matrix.target }}/release/sendbuilds" "dist/${{ matrix.name }}"
+            cp "target/${{ matrix.target }}/release/sendbuilds" "$PKG_DIR/sendbuilds"
+            cp "scripts/install-unix.sh" "$PKG_DIR/install.sh"
+            chmod +x "$PKG_DIR/sendbuilds" "$PKG_DIR/install.sh"
+            tar -C "$PKG_DIR" -czf "dist/${{ matrix.asset_name }}" .
           fi
+          shasum -a 256 "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
+          rm -rf "$PKG_DIR"
 
       - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/${{ matrix.asset_name }}
+            dist/${{ matrix.asset_name }}.sha256

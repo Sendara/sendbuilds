@@ -12,6 +12,28 @@ Build automation CLI with step events, caching, auto-detection, metrics, sandbox
 sendbuilds build --config sendbuild.toml
 ```
 
+## Install from Releases
+
+Release assets are packaged for direct CLI install:
+- Linux/macOS: `.tar.gz` (contains `sendbuilds` + `install.sh`)
+- Windows: `.zip` (contains `sendbuilds.exe` + `install.ps1`)
+
+Linux/macOS:
+
+```bash
+tar -xzf sendbuilds-linux-x86_64.tar.gz
+./install.sh
+sendbuilds --help
+```
+
+Windows PowerShell:
+
+```powershell
+Expand-Archive .\sendbuilds-windows-x86_64.zip -DestinationPath .\sendbuilds
+.\sendbuilds\install.ps1
+sendbuilds.exe --help
+```
+
 ## Local development and testing
 
 Build and run the CLI locally:
