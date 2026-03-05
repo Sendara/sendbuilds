@@ -22,6 +22,7 @@ use crate::workers::parallel::{self, ParallelStepTask};
 pub struct BuildEngine {
     config: BuildConfig,
     in_place: bool,
+    events_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +54,7 @@ impl BuildEngine {
         Self {
             config,
             in_place: false,
+            events_override: None,
         }
     }
 
@@ -66,9 +68,17 @@ impl BuildEngine {
         self
     }
 
+    pub fn with_events(mut self, events: Option<bool>) -> Self {
+        self.events_override = events;
+        self
+    }
+
     pub fn run(self) -> Result<()> {
         let cfg = &self.config;
-        let events_enabled = cfg.output.as_ref().and_then(|o| o.events).unwrap_or(true);
+        let events_enabled = self
+            .events_override
+            .or_else(|| cfg.output.as_ref().and_then(|o| o.events))
+            .unwrap_or(true);
         events::set_enabled(events_enabled);
 
         let env_map = self.resolve_env();

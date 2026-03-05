@@ -47,8 +47,8 @@ If `[source]` is omitted in `sendbuild.toml`, `sendbuilds` uses the current work
 ## CLI commands
 
 ```bash
-sendbuilds build [--config sendbuild.toml]
-sendbuilds build [--config sendbuild.toml] [--in-place]
+sendbuilds build [--config sendbuild.toml] [--events true|false]
+sendbuilds build [--config sendbuild.toml] [--in-place] [--events true|false]
 sendbuilds build --git <repo> --docker [--branch <name>] [--image <tag>]
 sendbuilds init [--template <framework>] [--yes]
 sendbuilds cache save|restore|clear|status [--config sendbuild.toml]

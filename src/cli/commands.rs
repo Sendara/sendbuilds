@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::core::config::{
-    CacheConfig, DeployConfig, ProjectConfig, SandboxConfig, ScanConfig, SecurityConfig,
-    SigningConfig, SourceConfig,
+    CacheConfig, DeployConfig, OutputConfig, ProjectConfig, SandboxConfig, ScanConfig,
+    SecurityConfig, SigningConfig, SourceConfig,
 };
 use crate::core::BuildConfig;
 use crate::engine::BuildEngine;
@@ -24,6 +24,8 @@ enum Cmd {
     Build {
         #[arg(short, long, default_value = "sendbuild.toml")]
         config: String,
+        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        events: Option<bool>,
         #[arg(long)]
         in_place: bool,
         #[arg(long)]
@@ -78,6 +80,7 @@ pub fn run() -> Result<()> {
     match cli.cmd {
         Cmd::Build {
             config,
+            events,
             in_place,
             git,
             branch,
@@ -85,17 +88,23 @@ pub fn run() -> Result<()> {
             image,
         } => {
             if git.is_some() || docker {
-                return run_quick_build(git, branch, docker, image, in_place);
+                return run_quick_build(git, branch, docker, image, in_place, events);
             }
             if BuildConfig::exists(&config) {
-                BuildEngine::load(&config)?.with_in_place(in_place).run()
+                BuildEngine::load(&config)?
+                    .with_in_place(in_place)
+                    .with_events(events)
+                    .run()
             } else {
                 println!(
                     "No config file found at '{}'. Running smart local build mode.",
                     config
                 );
                 let cfg = BuildConfig::for_local_workspace()?;
-                BuildEngine::from_config(cfg).with_in_place(true).run()
+                BuildEngine::from_config(cfg)
+                    .with_in_place(true)
+                    .with_events(events)
+                    .run()
             }
         }
         Cmd::Init { template, yes } => init_project(template.as_deref(), yes),
@@ -119,6 +128,7 @@ fn run_quick_build(
     docker: bool,
     image: Option<String>,
     in_place: bool,
+    events: Option<bool>,
 ) -> Result<()> {
     let has_git = git_repo.is_some();
     let name = git_repo
@@ -154,7 +164,7 @@ fn run_quick_build(
             kubernetes: None,
             gc: None,
         },
-        output: None,
+        output: Some(OutputConfig { events }),
         cache: Some(CacheConfig {
             enabled: Some(true),
             dir: None,
@@ -191,6 +201,7 @@ fn run_quick_build(
 
     BuildEngine::from_config(cfg)
         .with_in_place(in_place || !has_git)
+        .with_events(events)
         .run()
 }
 
