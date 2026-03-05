@@ -84,12 +84,15 @@ jobs:
             chmod +x "$PKG_DIR/sendbuilds" "$PKG_DIR/install.sh"
             tar -C "$PKG_DIR" -czf "dist/${{ matrix.asset_name }}" .
           fi
-          if command -v shasum >/dev/null 2>&1; then
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 'dist\\${{ matrix.asset_name }}').Hash.ToLower(); '$h  ${{ matrix.asset_name }}' | Out-File -Encoding ascii 'dist\\${{ matrix.asset_name }}.sha256'"
+          elif command -v shasum >/dev/null 2>&1; then
             shasum -a 256 "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
           elif command -v sha256sum >/dev/null 2>&1; then
             sha256sum "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
           else
-            powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 'dist\\${{ matrix.asset_name }}').Hash.ToLower(); '$h  ${{ matrix.asset_name }}' | Out-File -Encoding ascii 'dist\\${{ matrix.asset_name }}.sha256'"
+            echo "No checksum tool found (shasum/sha256sum)" >&2
+            exit 1
           fi
           rm -rf "$PKG_DIR"
 
