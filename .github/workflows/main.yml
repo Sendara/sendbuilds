@@ -86,13 +86,9 @@ jobs:
           fi
           if [ "${{ runner.os }}" = "Windows" ]; then
             powershell -NoProfile -Command "$h=(Get-FileHash -Algorithm SHA256 'dist\\${{ matrix.asset_name }}').Hash.ToLower(); '$h  ${{ matrix.asset_name }}' | Out-File -Encoding ascii 'dist\\${{ matrix.asset_name }}.sha256'"
-          elif command -v shasum >/dev/null 2>&1; then
-            shasum -a 256 "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
-          elif command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "dist/${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
           else
-            echo "No checksum tool found (shasum/sha256sum)" >&2
-            exit 1
+            HASH="$(openssl dgst -sha256 "dist/${{ matrix.asset_name }}" | awk '{print $NF}')"
+            printf "%s  %s\n" "$HASH" "${{ matrix.asset_name }}" > "dist/${{ matrix.asset_name }}.sha256"
           fi
           rm -rf "$PKG_DIR"
 
