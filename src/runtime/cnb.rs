@@ -7,14 +7,16 @@ use std::path::{Path, PathBuf};
 use crate::core::{Step, StepStatus};
 
 const PHASE_ORDER: [&str; 5] = ["detect", "analyze", "restore", "build", "export"];
-pub const LIFECYCLE_API: &str = "0.20";
-const PLATFORM_API: &str = "0.12";
+pub const LIFECYCLE_API: &str = "0.21";
+const PLATFORM_API: &str = "0.15";
+const BUILDPACK_API: &str = "0.12";
 
 #[derive(Debug, Serialize)]
 struct LifecycleContract {
     schema_version: String,
     lifecycle_api: String,
     platform_api: String,
+    buildpack_api: String,
     phases: Vec<ContractPhase>,
 }
 
@@ -32,6 +34,7 @@ struct LifecycleMetadata {
     schema_version: String,
     lifecycle_api: String,
     platform_api: String,
+    buildpack_api: String,
     builder: BuilderMetadata,
     project: ProjectMetadata,
     buildpacks: Vec<BuildpackMetadata>,
@@ -77,6 +80,7 @@ pub fn write_lifecycle_contract(root: &Path) -> Result<PathBuf> {
         schema_version: "1".to_string(),
         lifecycle_api: LIFECYCLE_API.to_string(),
         platform_api: PLATFORM_API.to_string(),
+        buildpack_api: BUILDPACK_API.to_string(),
         phases: vec![
             ContractPhase {
                 name: "detect".to_string(),
@@ -178,6 +182,7 @@ pub fn write_lifecycle_metadata(
         schema_version: "1".to_string(),
         lifecycle_api: LIFECYCLE_API.to_string(),
         platform_api: PLATFORM_API.to_string(),
+        buildpack_api: BUILDPACK_API.to_string(),
         builder: BuilderMetadata {
             id: "io.sendbuilds.builder".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),

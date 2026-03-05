@@ -3,6 +3,7 @@ use hmac::{Hmac, Mac};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,10 +68,12 @@ pub fn write_provenance(
     outputs: &[PathBuf],
     options: &ProvenanceOptions,
 ) -> Result<PathBuf> {
-    let digest_entries = outputs
-        .iter()
-        .filter_map(|p| file_sha256(output_root, p).ok())
-        .collect::<Vec<_>>();
+    let started = chrono::Local::now();
+    let digest_entries = subject_digests(output_root, outputs)?;
+    let resolved_dependencies = resolved_dependencies(output_root)?;
+    let builder_dependencies = builder_dependencies();
+    let byproducts = byproducts(output_root);
+    let finished = chrono::Local::now();
 
     let statement = json!({
         "_type": "https://in-toto.io/Statement/v1",
@@ -82,17 +85,22 @@ pub fn write_provenance(
                 "externalParameters": {
                     "project": options.project_name,
                     "container_image": options.container_image,
-                }
+                },
+                "internalParameters": {},
+                "resolvedDependencies": resolved_dependencies
             },
             "runDetails": {
                 "builder": {
-                    "id": "io.sendbuilds.builder"
+                    "id": "io.sendbuilds.builder",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "builderDependencies": builder_dependencies
                 },
                 "metadata": {
-                    "invocationId": format!("sendbuilds-{}", chrono::Local::now().timestamp_millis()),
-                    "startedOn": chrono::Local::now().to_rfc3339(),
-                    "finishedOn": chrono::Local::now().to_rfc3339(),
-                }
+                    "invocationId": format!("sendbuilds-{}", finished.timestamp_millis()),
+                    "startedOn": started.to_rfc3339(),
+                    "finishedOn": finished.to_rfc3339(),
+                },
+                "byproducts": byproducts
             }
         }
     });
@@ -158,6 +166,204 @@ fn file_sha256(root: &Path, path: &Path) -> Result<serde_json::Value> {
             "sha256": digest
         }
     }))
+}
+
+fn subject_digests(root: &Path, outputs: &[PathBuf]) -> Result<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    for output in outputs {
+        if !output.exists() {
+            continue;
+        }
+        let meta = fs::metadata(output)?;
+        if meta.is_file() {
+            out.push(file_sha256(root, output)?);
+            continue;
+        }
+        if meta.is_dir() {
+            out.push(dir_sha256(root, output)?);
+        }
+    }
+    Ok(out)
+}
+
+fn dir_sha256(root: &Path, dir: &Path) -> Result<serde_json::Value> {
+    let mut entries = Vec::new();
+    collect_dir_entries_for_digest(dir, dir, &mut entries)?;
+    entries.sort();
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update(entry.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = hex::encode(hasher.finalize());
+    let rel = dir
+        .strip_prefix(root)
+        .unwrap_or(dir)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(json!({
+        "name": rel,
+        "digest": {
+            "sha256": digest
+        }
+    }))
+}
+
+fn collect_dir_entries_for_digest(base: &Path, current: &Path, out: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            collect_dir_entries_for_digest(base, &path, out)?;
+        } else if ty.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let digest = sha256_file(&path)?;
+            out.push(format!("{rel}:{digest}"));
+        }
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let data = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn resolved_dependencies(output_root: &Path) -> Result<Vec<serde_json::Value>> {
+    let lockfile_names = [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "Cargo.lock",
+        "poetry.lock",
+        "requirements.txt",
+        "Gemfile.lock",
+        "composer.lock",
+        "go.sum",
+        "packages.lock.json",
+    ];
+    let files = find_files_by_name(output_root, &lockfile_names)?;
+    let mut out = Vec::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(output_root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let digest = sha256_file(&file)?;
+        out.push(json!({
+            "uri": format!("file://{rel}"),
+            "digest": { "sha256": digest }
+        }));
+    }
+    Ok(out)
+}
+
+fn find_files_by_name(root: &Path, names: &[&str]) -> Result<Vec<PathBuf>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let wanted = names
+        .iter()
+        .map(|v| v.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut out = Vec::new();
+    find_files_by_name_recursive(root, root, &wanted, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn find_files_by_name_recursive(
+    _root: &Path,
+    current: &Path,
+    wanted: &BTreeSet<String>,
+    out: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            find_files_by_name_recursive(_root, &path, wanted, out)?;
+        } else if ty.is_file() {
+            let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+                continue;
+            };
+            if wanted.contains(&name.to_ascii_lowercase()) {
+                out.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn builder_dependencies() -> Vec<serde_json::Value> {
+    let mut out = vec![json!({
+        "uri": "pkg:generic/sendbuilds",
+        "digest": { "sha256": hex::encode(Sha256::digest(env!("CARGO_PKG_VERSION").as_bytes())) },
+        "version": env!("CARGO_PKG_VERSION"),
+    })];
+    if let Some(ver) = command_version("docker", &["--version"]) {
+        out.push(version_dependency("docker", &ver));
+    }
+    if let Some(ver) = command_version("cosign", &["version"]) {
+        out.push(version_dependency("cosign", &ver));
+    }
+    out
+}
+
+fn version_dependency(name: &str, version: &str) -> serde_json::Value {
+    json!({
+        "uri": format!("pkg:generic/{name}"),
+        "digest": { "sha256": hex::encode(Sha256::digest(version.as_bytes())) },
+        "version": version,
+    })
+}
+
+fn command_version(bin: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(bin).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout.lines().next().unwrap_or_default().to_string());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if stderr.is_empty() {
+        None
+    } else {
+        Some(stderr.lines().next().unwrap_or_default().to_string())
+    }
+}
+
+fn byproducts(output_root: &Path) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for rel in [
+        "artifact-manifest.json",
+        "artifact-manifest.sig",
+        "build-metrics.json",
+        "security-report.json",
+        "sbom.json",
+        "supply-chain-metadata.json",
+        "cnb/lifecycle-contract.json",
+        "cnb/lifecycle-metadata.json",
+    ] {
+        let path = output_root.join(rel);
+        if path.exists() {
+            out.push(json!({
+                "path": rel.replace('\\', "/")
+            }));
+        }
+    }
+    out
 }
 
 fn run_cosign_sign(image: &str, key: Option<&str>) -> Result<()> {
