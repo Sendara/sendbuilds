@@ -12,6 +12,12 @@ Build automation CLI with step events, caching, auto-detection, metrics, sandbox
 sendbuilds build --config sendbuild.toml
 ```
 
+## Install
+
+```bash
+curl -fsSL https://sendara.cloud/sendbuilds/install.sh | bash
+```
+
 ## Install from Releases
 
 Release assets are packaged for direct CLI install:
