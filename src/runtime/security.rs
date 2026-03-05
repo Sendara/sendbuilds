@@ -736,15 +736,26 @@ fn maybe_switch_to_distroless(
     let old_base = old_tokens[1].to_string();
     out.from_base = Some(old_base.clone());
     out.to_base = Some(desired.clone());
-    if old_base.contains("distroless") {
-        return Ok(out);
-    }
-
     let alias = if old_tokens.len() >= 4 && old_tokens[2].eq_ignore_ascii_case("as") {
         Some(old_tokens[3].to_string())
     } else {
         None
     };
+    let mut runtime_rewritten = false;
+    if language == "nodejs" {
+        let Some(changed) =
+            ensure_distroless_compatible_node_runtime(&mut lines, from_idx, work_dir)
+        else {
+            return Ok(out);
+        };
+        runtime_rewritten = changed;
+    }
+    if old_base.contains("distroless") {
+        if runtime_rewritten {
+            fs::write(&dockerfile, lines.join("\n"))?;
+        }
+        return Ok(out);
+    }
     lines[from_idx] = match alias {
         Some(a) => format!("FROM {desired} AS {a}"),
         None => format!("FROM {desired}"),
@@ -752,6 +763,168 @@ fn maybe_switch_to_distroless(
     fs::write(&dockerfile, lines.join("\n"))?;
     out.switched = true;
     Ok(out)
+}
+
+fn ensure_distroless_compatible_node_runtime(
+    lines: &mut [String],
+    from_idx: usize,
+    work_dir: &Path,
+) -> Option<bool> {
+    let Some((cmd_idx, directive, mut tokens)) = find_stage_runtime_command(lines, from_idx) else {
+        return Some(false);
+    };
+    if !tokens_use_node_package_manager(&tokens) {
+        return Some(false);
+    }
+    if !directive.eq_ignore_ascii_case("CMD") {
+        return None;
+    }
+    let Some(rewritten) = rewrite_node_runtime_tokens_for_distroless(&tokens, work_dir) else {
+        return None;
+    };
+    tokens = rewritten;
+    let cmd_json = tokens
+        .iter()
+        .map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rewritten_line = format!("CMD [{cmd_json}]");
+    if lines[cmd_idx] != rewritten_line {
+        lines[cmd_idx] = rewritten_line;
+        Some(true)
+    } else {
+        Some(false)
+    }
+}
+
+fn find_stage_runtime_command(
+    lines: &[String],
+    from_idx: usize,
+) -> Option<(usize, String, Vec<String>)> {
+    let mut out: Option<(usize, String, Vec<String>)> = None;
+    for (idx, raw) in lines.iter().enumerate().skip(from_idx + 1) {
+        let line = raw.trim();
+        if line.to_uppercase().starts_with("FROM ") {
+            break;
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.to_uppercase().starts_with("CMD ") {
+            if let Some(tokens) = parse_container_command_tokens(line, "CMD") {
+                out = Some((idx, "CMD".to_string(), tokens));
+            }
+        } else if line.to_uppercase().starts_with("ENTRYPOINT ") {
+            if let Some(tokens) = parse_container_command_tokens(line, "ENTRYPOINT") {
+                out = Some((idx, "ENTRYPOINT".to_string(), tokens));
+            }
+        }
+    }
+    out
+}
+
+fn parse_container_command_tokens(line: &str, directive: &str) -> Option<Vec<String>> {
+    let rest = line.trim().strip_prefix(directive)?.trim();
+    if rest.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(rest).ok()
+    } else {
+        let out = rest
+            .split_whitespace()
+            .map(|v| v.trim_matches('"').trim_matches('\'').to_string())
+            .filter(|v| !v.is_empty())
+            .collect::<Vec<_>>();
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+}
+
+fn tokens_use_node_package_manager(tokens: &[String]) -> bool {
+    let first = tokens.first().map(|v| v.to_lowercase()).unwrap_or_default();
+    matches!(first.as_str(), "pnpm" | "npm" | "yarn" | "npx" | "corepack")
+}
+
+fn rewrite_node_runtime_tokens_for_distroless(
+    tokens: &[String],
+    work_dir: &Path,
+) -> Option<Vec<String>> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let first = tokens[0].to_lowercase();
+    if first == "npx" && tokens.len() >= 3 && tokens[1].eq_ignore_ascii_case("next") {
+        return rewrite_next_start_tokens(&tokens[1..]);
+    }
+    if (first == "pnpm" || first == "npm" || first == "yarn") && tokens.len() >= 2 {
+        if first == "pnpm" && tokens[1].eq_ignore_ascii_case("exec") && tokens.len() >= 4 {
+            return rewrite_next_start_tokens(&tokens[2..]);
+        }
+        if first == "yarn" && tokens[1].eq_ignore_ascii_case("next") && tokens.len() >= 3 {
+            return rewrite_next_start_tokens(&tokens[1..]);
+        }
+
+        let script_name = if tokens[1].eq_ignore_ascii_case("run") {
+            tokens.get(2).map(String::as_str)
+        } else {
+            tokens.get(1).map(String::as_str)
+        };
+        if let Some(name) = script_name {
+            return rewrite_script_name_for_distroless(work_dir, name);
+        }
+    }
+    None
+}
+
+fn rewrite_script_name_for_distroless(work_dir: &Path, script_name: &str) -> Option<Vec<String>> {
+    let raw = fs::read_to_string(work_dir.join("package.json")).ok()?;
+    let parsed = serde_json::from_str::<Value>(&raw).ok()?;
+    let script = parsed
+        .get("scripts")
+        .and_then(|s| s.get(script_name))
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
+    rewrite_script_command_for_distroless(&script)
+}
+
+fn rewrite_script_command_for_distroless(script: &str) -> Option<Vec<String>> {
+    let trimmed = script.trim();
+    if let Some(rest) = trimmed.strip_prefix("node ") {
+        let out = rest
+            .split_whitespace()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if out.is_empty() {
+            return None;
+        }
+        return Some(out);
+    }
+    if let Some(idx) = trimmed.to_lowercase().find("next start") {
+        let tail = trimmed[idx..].split_whitespace().collect::<Vec<_>>();
+        if !tail.is_empty() {
+            return rewrite_next_start_tokens(
+                &tail.iter().map(|v| (*v).to_string()).collect::<Vec<_>>(),
+            );
+        }
+    }
+    None
+}
+
+fn rewrite_next_start_tokens(tokens: &[String]) -> Option<Vec<String>> {
+    if tokens.len() < 2 {
+        return None;
+    }
+    if !tokens[0].eq_ignore_ascii_case("next") || !tokens[1].eq_ignore_ascii_case("start") {
+        return None;
+    }
+    let mut out = vec![
+        "node_modules/next/dist/bin/next".to_string(),
+        "start".to_string(),
+    ];
+    out.extend(tokens.iter().skip(2).cloned());
+    Some(out)
 }
 
 fn generate_sbom_document(build_cfg: &BuildConfig, work_dir: &Path, language: &str) -> Value {

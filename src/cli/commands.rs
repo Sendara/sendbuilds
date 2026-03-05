@@ -160,7 +160,8 @@ fn run_quick_build(
             targets: Some(targets),
             container_image: Some(image_tag),
             container_platforms: None,
-            push_container: Some(docker),
+            // quick builds ofc
+            push_container: Some(false),
             rebase_base: None,
             kubernetes: None,
             gc: None,

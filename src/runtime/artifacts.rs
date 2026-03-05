@@ -585,6 +585,9 @@ fn ensure_dockerignore(src: &Path) -> Result<bool> {
 
 fn infer_node_start_command(src: &Path) -> Result<Vec<String>> {
     let package_manager = detect_node_package_manager(src);
+    if let Some((cmd, _port)) = infer_node_start_from_package_json(src) {
+        return Ok(cmd);
+    }
     if has_package_script(src, "start") {
         return Ok(match package_manager {
             "pnpm" => vec!["pnpm".to_string(), "run".to_string(), "start".to_string()],
@@ -1151,11 +1154,20 @@ fn infer_node_start_from_package_json(src: &Path) -> Option<(Vec<String>, Option
         .unwrap_or("");
 
     if !start_script.is_empty() {
-        if start_script == "next start" || start_script.starts_with("next start ") {
-            return Some((
-                vec!["npm".to_string(), "run".to_string(), "start".to_string()],
-                Some(3000),
-            ));
+        let parts = start_script
+            .split_whitespace()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if parts.len() >= 2
+            && parts[0].eq_ignore_ascii_case("next")
+            && parts[1].eq_ignore_ascii_case("start")
+        {
+            let mut cmd = vec![
+                "node_modules/next/dist/bin/next".to_string(),
+                "start".to_string(),
+            ];
+            cmd.extend(parts.into_iter().skip(2));
+            return Some((cmd, Some(3000)));
         }
         if let Some(rest) = start_script.strip_prefix("node ") {
             let parts = rest
