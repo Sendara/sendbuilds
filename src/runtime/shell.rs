@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -52,23 +51,22 @@ pub fn run_allow_failure(
         command.env(k, v);
     }
 
-    let mut child = command
+    let child = command
         .spawn()
         .with_context(|| format!("failed to spawn: {cmd}"))?;
+    let output = child.wait_with_output()?;
 
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            logs.push(format!("stdout: {line}"));
-        }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        logs.push(format!("stdout: {line}"));
     }
 
-    if let Some(err) = child.stderr.take() {
-        for line in BufReader::new(err).lines().map_while(Result::ok) {
-            logs.push(format!("stderr: {line}"));
-        }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        logs.push(format!("stderr: {line}"));
     }
 
-    let status = child.wait()?;
+    let status = output.status;
     let secs = start.elapsed().as_secs_f32();
     let success = status.success();
     let exit_code = status.code();
@@ -127,5 +125,27 @@ fn shell_cmd(cmd: &str) -> Command {
         let mut c = Command::new("sh");
         c.args(["-c", cmd]);
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_blocked_command, run_allow_failure};
+    use std::collections::HashMap;
+
+    #[test]
+    fn blocked_command_detection_is_case_insensitive() {
+        assert!(is_blocked_command("RM -rf C:\\"));
+        assert!(!is_blocked_command("echo safe"));
+    }
+
+    #[test]
+    fn run_allow_failure_captures_stdout_and_stderr() {
+        let wd = std::env::current_dir().expect("current dir");
+        let env = HashMap::new();
+        let run = run_allow_failure("echo hello && echo boom 1>&2", &wd, &env, false).expect("run");
+        assert!(run.success);
+        assert!(run.logs.iter().any(|l| l.contains("stdout: hello")));
+        assert!(run.logs.iter().any(|l| l.contains("stderr: boom")));
     }
 }

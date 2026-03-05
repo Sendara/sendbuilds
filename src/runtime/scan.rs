@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 
 use crate::core::ScanConfig;
 use crate::runtime::shell::{self, ShellRunOutput};
@@ -19,10 +20,38 @@ pub fn run(
 
     match normalize_language(language).as_str() {
         "nodejs" => run_node_scan(work_dir, env, sandbox),
-        "python" => shell::run("pip-audit -f json", work_dir, env, sandbox),
-        "ruby" => shell::run("bundle audit check --update", work_dir, env, sandbox),
-        "go" => shell::run("govulncheck ./...", work_dir, env, sandbox),
-        "rust" => shell::run("cargo audit", work_dir, env, sandbox),
+        "python" => run_optional_scan(
+            "pip-audit -f json",
+            "pip-audit",
+            &["--version"],
+            work_dir,
+            env,
+            sandbox,
+        ),
+        "ruby" => run_optional_scan(
+            "bundle audit check --update",
+            "bundle",
+            &["--version"],
+            work_dir,
+            env,
+            sandbox,
+        ),
+        "go" => run_optional_scan(
+            "govulncheck ./...",
+            "govulncheck",
+            &["-version"],
+            work_dir,
+            env,
+            sandbox,
+        ),
+        "rust" => run_optional_scan(
+            "cargo audit",
+            "cargo",
+            &["audit", "--version"],
+            work_dir,
+            env,
+            sandbox,
+        ),
         "java" => shell::run(
             "echo security scan skipped: configure scanner for java",
             work_dir,
@@ -42,6 +71,33 @@ pub fn run(
             sandbox,
         ),
     }
+}
+
+fn run_optional_scan(
+    run_cmd: &str,
+    check_bin: &str,
+    check_args: &[&str],
+    work_dir: &Path,
+    env: &HashMap<String, String>,
+    sandbox: bool,
+) -> Result<ShellRunOutput> {
+    if !command_available(check_bin, check_args) {
+        return shell::run(
+            &format!("echo security scan skipped: scanner unavailable ({check_bin})"),
+            work_dir,
+            env,
+            sandbox,
+        );
+    }
+    shell::run(run_cmd, work_dir, env, sandbox)
+}
+
+fn command_available(bin: &str, args: &[&str]) -> bool {
+    Command::new(bin)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 pub fn enabled(config: Option<&ScanConfig>) -> bool {
@@ -146,5 +202,31 @@ fn normalize_language(language: &str) -> String {
         "php" => "php".to_string(),
         "rust" | "rs" => "rust".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_json, normalize_language, parse_npm_audit_summary};
+
+    #[test]
+    fn parse_npm_summary_with_vulnerabilities() {
+        let logs = vec![
+            r#"stdout: {"vulnerabilities":{"minimist":{"severity":"high","fixAvailable":true}}}"#
+                .to_string(),
+        ];
+        let summary = parse_npm_audit_summary(&logs);
+        assert!(summary.contains("minimist(high,fix:available)"));
+    }
+
+    #[test]
+    fn collect_json_returns_none_when_absent() {
+        let logs = vec!["stdout: plain text".to_string()];
+        assert!(collect_json(&logs).is_none());
+    }
+
+    #[test]
+    fn normalize_language_alias() {
+        assert_eq!(normalize_language("py"), "python");
     }
 }

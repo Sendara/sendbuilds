@@ -5,7 +5,11 @@ use std::process::Command;
 pub fn clone(repo: &str, dest: &Path) -> Result<()> {
     let normalized = normalize_repo(repo);
     let ok = Command::new("git")
-        .args(["clone", "--depth", "1", &normalized, dest.to_str().unwrap()])
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(&normalized)
+        .arg(dest)
         .status()?
         .success();
 
@@ -82,4 +86,29 @@ fn is_slug(v: &str) -> bool {
     !v.is_empty()
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_owner_repo_shorthand, normalize_repo};
+
+    #[test]
+    fn normalize_repo_keeps_full_url() {
+        let repo = "https://github.com/owner/repo.git";
+        assert_eq!(normalize_repo(repo), repo);
+    }
+
+    #[test]
+    fn normalize_repo_expands_owner_repo() {
+        assert_eq!(
+            normalize_repo("owner/repo"),
+            "https://github.com/owner/repo.git"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_rejects_invalid_shorthand() {
+        assert_eq!(normalize_repo("owner/repo/extra"), "owner/repo/extra");
+        assert!(!is_owner_repo_shorthand("owner/repo/extra"));
+    }
 }

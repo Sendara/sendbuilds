@@ -108,6 +108,12 @@ pub fn run(
     }
 
     report.vulnerability_scan = run_vulnerability_scan(&normalized, work_dir, env, sandbox)?;
+    if !report.vulnerability_scan.scanned {
+        report.notes.push(format!(
+            "vulnerability scanner unavailable for language={} scanner={}",
+            normalized, report.vulnerability_scan.scanner
+        ));
+    }
     report.distroless = maybe_switch_to_distroless(
         &normalized,
         work_dir,
@@ -195,6 +201,14 @@ fn run_vulnerability_scan(
         "nodejs" => scan_nodejs(work_dir, env, sandbox),
         "python" => {
             let cmd = "pip-audit -f json";
+            if !command_available("pip-audit", &["--version"]) {
+                return Ok(VulnerabilitySummary {
+                    scanner: "pip-audit".to_string(),
+                    scanned: false,
+                    command: cmd.to_string(),
+                    ..Default::default()
+                });
+            }
             let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
             let mut summary = VulnerabilitySummary {
                 scanner: "pip-audit".to_string(),
@@ -213,6 +227,14 @@ fn run_vulnerability_scan(
         }
         "rust" => {
             let cmd = "cargo audit --json";
+            if !command_available("cargo", &["audit", "--version"]) {
+                return Ok(VulnerabilitySummary {
+                    scanner: "cargo-audit".to_string(),
+                    scanned: false,
+                    command: cmd.to_string(),
+                    ..Default::default()
+                });
+            }
             let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
             let mut summary = VulnerabilitySummary {
                 scanner: "cargo-audit".to_string(),
@@ -248,6 +270,14 @@ fn scan_nodejs(
     sandbox: bool,
 ) -> Result<VulnerabilitySummary> {
     let cmd = "npm audit --json --omit=dev";
+    if !command_available("npm", &["--version"]) {
+        return Ok(VulnerabilitySummary {
+            scanner: "npm-audit".to_string(),
+            scanned: false,
+            command: cmd.to_string(),
+            ..Default::default()
+        });
+    }
     let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
     let mut summary = VulnerabilitySummary {
         scanner: "npm-audit".to_string(),
@@ -268,6 +298,14 @@ fn scan_nodejs(
         }
     }
     Ok(summary)
+}
+
+fn command_available(bin: &str, args: &[&str]) -> bool {
+    Command::new(bin)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn maybe_switch_to_distroless(
@@ -565,5 +603,42 @@ fn normalize_language(language: &str) -> String {
         "rust" | "rs" => "rust".to_string(),
         "c" | "cpp" | "c++" | "c_cpp" | "cc" => "c_cpp".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_json, normalize_language, to_u32};
+    use serde_json::json;
+
+    #[test]
+    fn collect_json_extracts_object_payload() {
+        let logs = vec![
+            "stdout: some prefix".to_string(),
+            "stdout: {\"a\":1}".to_string(),
+            "stderr: trailing".to_string(),
+        ];
+        assert_eq!(collect_json(&logs).as_deref(), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn collect_json_extracts_array_payload() {
+        let logs = vec![
+            "stdout: noise".to_string(),
+            "stdout: [{\"id\":1}]".to_string(),
+            "stdout: more".to_string(),
+        ];
+        assert_eq!(collect_json(&logs).as_deref(), Some("[{\"id\":1}]"));
+    }
+
+    #[test]
+    fn to_u32_handles_string_values() {
+        let v = json!("42");
+        assert_eq!(to_u32(Some(&v)), 42);
+    }
+
+    #[test]
+    fn normalize_language_maps_alias() {
+        assert_eq!(normalize_language("golang"), "go");
     }
 }
