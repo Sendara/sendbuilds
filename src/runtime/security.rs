@@ -28,6 +28,10 @@ pub struct VulnerabilitySummary {
     pub scanner: String,
     pub scanned: bool,
     pub command: String,
+    pub scanner_attempts: Vec<String>,
+    pub unavailable_reason: Option<String>,
+    pub packages: Vec<String>,
+    pub suggestions: Vec<String>,
     pub total: u32,
     pub critical: u32,
     pub high: u32,
@@ -112,15 +116,27 @@ pub fn run(
 
     report.vulnerability_scan = run_vulnerability_scan(&normalized, work_dir, env, sandbox)?;
     if !report.vulnerability_scan.scanned {
+        let reason = report
+            .vulnerability_scan
+            .unavailable_reason
+            .clone()
+            .unwrap_or_else(|| "scanner unavailable".to_string());
         report.notes.push(format!(
-            "vulnerability scanner unavailable for language={} scanner={}",
-            normalized, report.vulnerability_scan.scanner
+            "vulnerability scanner unavailable for language={} scanner={} reason={}",
+            normalized, report.vulnerability_scan.scanner, reason
         ));
         if fail_on_scanner_unavailable && scanner_expected_for_language(&normalized) {
+            let suggestions = if report.vulnerability_scan.suggestions.is_empty() {
+                "none".to_string()
+            } else {
+                report.vulnerability_scan.suggestions.join(" | ")
+            };
             bail!(
-                "security policy violation: required scanner unavailable for language={} scanner={}",
+                "security policy violation: required scanner unavailable for language={} scanners={} reason={} suggestions={}",
                 normalized,
-                report.vulnerability_scan.scanner
+                report.vulnerability_scan.scanner,
+                reason,
+                suggestions
             );
         }
     }
@@ -159,7 +175,7 @@ pub fn run(
 pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
-        "security summary scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={}",
+        "security summary scanner={} scanned={} total={} critical={} high={} moderate={} low={} info={} unavailable_reason={}",
         report.vulnerability_scan.scanner,
         report.vulnerability_scan.scanned,
         report.vulnerability_scan.total,
@@ -167,8 +183,25 @@ pub fn to_build_logs(report: &SecurityReport) -> Vec<String> {
         report.vulnerability_scan.high,
         report.vulnerability_scan.moderate,
         report.vulnerability_scan.low,
-        report.vulnerability_scan.info
+        report.vulnerability_scan.info,
+        report
+            .vulnerability_scan
+            .unavailable_reason
+            .clone()
+            .unwrap_or_else(|| "none".to_string())
     ));
+    if !report.vulnerability_scan.packages.is_empty() {
+        lines.push(format!(
+            "security packages {}",
+            report.vulnerability_scan.packages.join(", ")
+        ));
+    }
+    if !report.vulnerability_scan.suggestions.is_empty() {
+        lines.push(format!(
+            "security suggestions {}",
+            report.vulnerability_scan.suggestions.join(" | ")
+        ));
+    }
     lines.push(format!(
         "security policy fail_on_critical={} critical_threshold={}",
         report.fail_on_critical, report.critical_threshold
@@ -207,119 +240,457 @@ fn run_vulnerability_scan(
     env: &HashMap<String, String>,
     sandbox: bool,
 ) -> Result<VulnerabilitySummary> {
-    match language {
-        "nodejs" => scan_nodejs(work_dir, env, sandbox),
-        "python" => {
-            let cmd = "pip-audit -f json";
-            if !command_available("pip-audit", &["--version"]) {
-                return Ok(VulnerabilitySummary {
-                    scanner: "pip-audit".to_string(),
-                    scanned: false,
-                    command: cmd.to_string(),
-                    ..Default::default()
-                });
-            }
-            let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
-            let mut summary = VulnerabilitySummary {
-                scanner: "pip-audit".to_string(),
-                scanned: true,
-                command: cmd.to_string(),
-                ..Default::default()
-            };
-            if let Some(raw) = collect_json(&run.logs) {
-                if let Ok(val) = serde_json::from_str::<Value>(&raw) {
-                    if let Some(arr) = val.as_array() {
-                        summary.total = arr.len() as u32;
-                    }
-                }
-            }
-            Ok(summary)
-        }
-        "rust" => {
-            let cmd = "cargo audit --json";
-            if !command_available("cargo", &["audit", "--version"]) {
-                return Ok(VulnerabilitySummary {
-                    scanner: "cargo-audit".to_string(),
-                    scanned: false,
-                    command: cmd.to_string(),
-                    ..Default::default()
-                });
-            }
-            let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
-            let mut summary = VulnerabilitySummary {
-                scanner: "cargo-audit".to_string(),
-                scanned: true,
-                command: cmd.to_string(),
-                ..Default::default()
-            };
-            if let Some(raw) = collect_json(&run.logs) {
-                if let Ok(val) = serde_json::from_str::<Value>(&raw) {
-                    summary.critical = val
-                        .get("vulnerabilities")
-                        .and_then(|v| v.get("list"))
-                        .and_then(Value::as_array)
-                        .map(|a| a.len() as u32)
-                        .unwrap_or(0);
-                    summary.total = summary.critical;
-                }
-            }
-            Ok(summary)
-        }
-        _ => Ok(VulnerabilitySummary {
-            scanner: "none".to_string(),
-            scanned: false,
-            command: "n/a".to_string(),
-            ..Default::default()
-        }),
-    }
-}
+    let candidates = scanner_candidates(language);
+    let mut unavailable = Vec::new();
+    let mut attempts = Vec::new();
 
-fn scan_nodejs(
-    work_dir: &Path,
-    env: &HashMap<String, String>,
-    sandbox: bool,
-) -> Result<VulnerabilitySummary> {
-    let cmd = "npm audit --json --omit=dev";
-    if !command_available("npm", &["--version"]) {
-        return Ok(VulnerabilitySummary {
-            scanner: "npm-audit".to_string(),
-            scanned: false,
-            command: cmd.to_string(),
+    for candidate in &candidates {
+        attempts.push(format!("{}:{}", candidate.scanner, candidate.command));
+        let run = shell::run_allow_failure(candidate.command, work_dir, env, sandbox)?;
+        if command_not_found_in_logs(&run.logs) {
+            unavailable.push(candidate.scanner.to_string());
+            continue;
+        }
+        let mut summary = VulnerabilitySummary {
+            scanner: candidate.scanner.to_string(),
+            scanned: true,
+            command: candidate.command.to_string(),
+            scanner_attempts: attempts.clone(),
+            suggestions: default_suggestions(language)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             ..Default::default()
-        });
+        };
+        parse_scan_output(candidate.parser, &run.logs, &mut summary);
+        if summary.packages.is_empty() {
+            summary.packages = extract_package_names(&run.logs);
+        }
+        if summary.total == 0 && !summary.packages.is_empty() {
+            summary.total = summary.packages.len() as u32;
+        }
+        return Ok(summary);
     }
-    let run = shell::run_allow_failure(cmd, work_dir, env, sandbox)?;
-    let mut summary = VulnerabilitySummary {
-        scanner: "npm-audit".to_string(),
-        scanned: true,
-        command: cmd.to_string(),
+
+    Ok(VulnerabilitySummary {
+        scanner: if unavailable.is_empty() {
+            "none".to_string()
+        } else {
+            unavailable.join(",")
+        },
+        scanned: false,
+        command: candidates
+            .iter()
+            .map(|c| c.command)
+            .collect::<Vec<_>>()
+            .join(" || "),
+        scanner_attempts: attempts,
+        unavailable_reason: Some(format!(
+            "no scanner executable found for language={} (attempted: {})",
+            language,
+            candidates
+                .iter()
+                .map(|c| c.scanner)
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
+        suggestions: default_suggestions(language)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         ..Default::default()
-    };
-    if let Some(raw) = collect_json(&run.logs) {
-        if let Ok(val) = serde_json::from_str::<Value>(&raw) {
-            let meta = val.get("metadata").and_then(|m| m.get("vulnerabilities"));
-            summary.critical = to_u32(meta.and_then(|v| v.get("critical")));
-            summary.high = to_u32(meta.and_then(|v| v.get("high")));
-            summary.moderate = to_u32(meta.and_then(|v| v.get("moderate")));
-            summary.low = to_u32(meta.and_then(|v| v.get("low")));
-            summary.info = to_u32(meta.and_then(|v| v.get("info")));
-            summary.total =
-                summary.critical + summary.high + summary.moderate + summary.low + summary.info;
-        }
-    }
-    Ok(summary)
-}
-
-fn command_available(bin: &str, args: &[&str]) -> bool {
-    Command::new(bin)
-        .args(args)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    })
 }
 
 fn scanner_expected_for_language(language: &str) -> bool {
-    matches!(language, "nodejs" | "python" | "rust")
+    matches!(
+        language,
+        "nodejs"
+            | "python"
+            | "ruby"
+            | "go"
+            | "java"
+            | "php"
+            | "rust"
+            | "static"
+            | "shell"
+            | "c_cpp"
+            | "gleam"
+            | "elixir"
+            | "deno"
+            | "dotnet"
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ScanParser {
+    NpmAudit,
+    PipAudit,
+    CargoAudit,
+    ComposerAudit,
+    DotnetAudit,
+    GenericJson,
+}
+
+#[derive(Clone, Copy)]
+struct ScannerCandidate {
+    scanner: &'static str,
+    command: &'static str,
+    parser: ScanParser,
+}
+
+fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
+    match language {
+        "nodejs" => vec![
+            ScannerCandidate {
+                scanner: "npm-audit",
+                command: "npm audit --json --omit=dev",
+                parser: ScanParser::NpmAudit,
+            },
+            ScannerCandidate {
+                scanner: "pnpm-audit",
+                command: "pnpm audit --json",
+                parser: ScanParser::GenericJson,
+            },
+            ScannerCandidate {
+                scanner: "yarn-npm-audit",
+                command: "yarn npm audit --json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "python" => vec![
+            ScannerCandidate {
+                scanner: "pip-audit",
+                command: "pip-audit -f json",
+                parser: ScanParser::PipAudit,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "ruby" => vec![
+            ScannerCandidate {
+                scanner: "bundle-audit",
+                command: "bundle audit check --update",
+                parser: ScanParser::GenericJson,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "go" => vec![
+            ScannerCandidate {
+                scanner: "govulncheck",
+                command: "govulncheck -json ./...",
+                parser: ScanParser::GenericJson,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "java" => vec![
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+            ScannerCandidate {
+                scanner: "maven-dependency-check",
+                command:
+                    "mvn -q -DskipTests org.owasp:dependency-check-maven:check -Dformat=JSON -DfailOnError=false",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "php" => vec![
+            ScannerCandidate {
+                scanner: "composer-audit",
+                command: "composer audit --format=json",
+                parser: ScanParser::ComposerAudit,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "rust" => vec![
+            ScannerCandidate {
+                scanner: "cargo-audit",
+                command: "cargo audit --json",
+                parser: ScanParser::CargoAudit,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "dotnet" => vec![
+            ScannerCandidate {
+                scanner: "dotnet-audit",
+                command: "dotnet list package --vulnerable --include-transitive --format json",
+                parser: ScanParser::DotnetAudit,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "deno" => vec![
+            ScannerCandidate {
+                scanner: "deno-audit",
+                command: "deno audit --json",
+                parser: ScanParser::GenericJson,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "elixir" => vec![
+            ScannerCandidate {
+                scanner: "mix-hex-audit",
+                command: "mix hex.audit",
+                parser: ScanParser::GenericJson,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
+        "gleam" | "static" | "shell" | "c_cpp" => vec![ScannerCandidate {
+            scanner: "osv-scanner",
+            command: "osv-scanner scan source -r . --format json",
+            parser: ScanParser::GenericJson,
+        }],
+        _ => vec![],
+    }
+}
+
+fn default_suggestions(language: &str) -> Vec<&'static str> {
+    match language {
+        "nodejs" => vec![
+            "Install npm or pnpm (Node.js toolchain) and rerun build",
+            "Run npm audit fix (or pnpm audit --fix) to remediate vulnerable packages",
+            "Ensure lockfile exists and dependencies are installed",
+        ],
+        "python" => vec![
+            "Install pip-audit: pip install pip-audit",
+            "Run pip-audit -f json manually and patch vulnerable packages",
+            "Commit updated requirements/lock files",
+        ],
+        "ruby" => vec![
+            "Install bundler-audit gem and run bundle audit check --update",
+            "Update Gemfile.lock with safe versions",
+        ],
+        "go" => vec![
+            "Install govulncheck: go install golang.org/x/vuln/cmd/govulncheck@latest",
+            "Run govulncheck ./... and update vulnerable modules",
+        ],
+        "java" => vec![
+            "Install osv-scanner or OWASP dependency-check plugin",
+            "Run scanner on pom.xml/gradle dependencies and update vulnerable artifacts",
+        ],
+        "php" => vec![
+            "Use composer audit --format=json and update composer.lock",
+            "Install osv-scanner as fallback scanner",
+        ],
+        "rust" => vec![
+            "Install cargo-audit: cargo install cargo-audit",
+            "Run cargo audit --json and patch vulnerable crates",
+        ],
+        "dotnet" => vec![
+            "Run dotnet list package --vulnerable --include-transitive --format json",
+            "Upgrade vulnerable NuGet packages",
+        ],
+        _ => vec![
+            "Install osv-scanner and rerun build",
+            "Provide a custom [scan].command for your ecosystem",
+        ],
+    }
+}
+
+fn parse_scan_output(parser: ScanParser, logs: &[String], summary: &mut VulnerabilitySummary) {
+    let raw = collect_json(logs);
+    let Some(raw) = raw else {
+        return;
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    match parser {
+        ScanParser::NpmAudit => parse_npm_audit_value(&val, summary),
+        ScanParser::PipAudit => parse_pip_audit_value(&val, summary),
+        ScanParser::CargoAudit => parse_cargo_audit_value(&val, summary),
+        ScanParser::ComposerAudit => parse_composer_audit_value(&val, summary),
+        ScanParser::DotnetAudit => parse_dotnet_audit_value(&val, summary),
+        ScanParser::GenericJson => parse_generic_vuln_json(&val, summary),
+    }
+}
+
+fn parse_npm_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {
+    let meta = val.get("metadata").and_then(|m| m.get("vulnerabilities"));
+    summary.critical = to_u32(meta.and_then(|v| v.get("critical")));
+    summary.high = to_u32(meta.and_then(|v| v.get("high")));
+    summary.moderate = to_u32(meta.and_then(|v| v.get("moderate")));
+    summary.low = to_u32(meta.and_then(|v| v.get("low")));
+    summary.info = to_u32(meta.and_then(|v| v.get("info")));
+    summary.total = summary.critical + summary.high + summary.moderate + summary.low + summary.info;
+    if let Some(vulns) = val.get("vulnerabilities").and_then(Value::as_object) {
+        summary.packages = vulns.keys().take(10).map(|k| k.to_string()).collect();
+    }
+}
+
+fn parse_pip_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {
+    if let Some(arr) = val.as_array() {
+        let mut packages = Vec::new();
+        let mut total = 0u32;
+        for item in arr {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                packages.push(name.to_string());
+            }
+            total += item
+                .get("vulns")
+                .and_then(Value::as_array)
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+        }
+        packages.sort();
+        packages.dedup();
+        summary.packages = packages;
+        summary.total = total.max(summary.packages.len() as u32);
+    }
+}
+
+fn parse_cargo_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {
+    if let Some(list) = val
+        .get("vulnerabilities")
+        .and_then(|v| v.get("list"))
+        .and_then(Value::as_array)
+    {
+        summary.total = list.len() as u32;
+        summary.critical = summary.total;
+        let mut packages = Vec::new();
+        for item in list {
+            if let Some(name) = item
+                .get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+            {
+                packages.push(name.to_string());
+            }
+        }
+        packages.sort();
+        packages.dedup();
+        summary.packages = packages;
+    }
+}
+
+fn parse_composer_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {
+    if let Some(advisories) = val.get("advisories").and_then(Value::as_object) {
+        summary.packages = advisories.keys().take(10).map(|k| k.to_string()).collect();
+        summary.total = advisories
+            .values()
+            .filter_map(Value::as_array)
+            .map(|a| a.len() as u32)
+            .sum();
+    }
+}
+
+fn parse_dotnet_audit_value(val: &Value, summary: &mut VulnerabilitySummary) {
+    summary.packages = collect_named_values(val, &["name", "packageName", "id"]);
+    let vuln_count = collect_named_values(val, &["severity", "advisoryUrl"]).len() as u32;
+    summary.total = vuln_count.max(summary.packages.len() as u32);
+    apply_severity_counts_from_json(val, summary);
+}
+
+fn parse_generic_vuln_json(val: &Value, summary: &mut VulnerabilitySummary) {
+    summary.packages =
+        collect_named_values(val, &["package", "name", "module", "crate", "dependency"]);
+    summary.total = summary.packages.len() as u32;
+    apply_severity_counts_from_json(val, summary);
+    if summary.total
+        < (summary.critical + summary.high + summary.moderate + summary.low + summary.info)
+    {
+        summary.total =
+            summary.critical + summary.high + summary.moderate + summary.low + summary.info;
+    }
+}
+
+fn apply_severity_counts_from_json(val: &Value, summary: &mut VulnerabilitySummary) {
+    let severities = collect_named_values(val, &["severity"]);
+    for sev in severities {
+        match sev.to_lowercase().as_str() {
+            "critical" => summary.critical += 1,
+            "high" => summary.high += 1,
+            "medium" | "moderate" => summary.moderate += 1,
+            "low" => summary.low += 1,
+            "info" | "informational" => summary.info += 1,
+            _ => {}
+        }
+    }
+}
+
+fn extract_package_names(logs: &[String]) -> Vec<String> {
+    let raw = collect_json(logs);
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    collect_named_values(&val, &["package", "name", "module", "crate", "dependency"])
+}
+
+fn collect_named_values(root: &Value, keys: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_named_values_recursive(root, keys, &mut out);
+    out.sort();
+    out.dedup();
+    out.into_iter().take(15).collect()
+}
+
+fn collect_named_values_recursive(root: &Value, keys: &[&str], out: &mut Vec<String>) {
+    match root {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if keys.iter().any(|needle| k.eq_ignore_ascii_case(needle)) {
+                    if let Some(s) = v.as_str() {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                }
+                collect_named_values_recursive(v, keys, out);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                collect_named_values_recursive(item, keys, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn command_not_found_in_logs(logs: &[String]) -> bool {
+    logs.iter().any(|line| {
+        let lower = line.to_lowercase();
+        lower.contains("not recognized as an internal or external command")
+            || lower.contains("command not found")
+            || lower.contains("no such file or directory")
+            || lower.contains("is not installed")
+    })
 }
 
 fn maybe_switch_to_distroless(
