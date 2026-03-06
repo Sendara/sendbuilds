@@ -41,6 +41,23 @@ enum Cmd {
         #[arg(long)]
         image: Option<String>,
     },
+    Deploy {
+        repo: Option<String>,
+        #[arg(long)]
+        local: bool,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        docker: bool,
+        #[arg(long = "target", value_delimiter = ',')]
+        targets: Vec<String>,
+        #[arg(long)]
+        image: Option<String>,
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        #[arg(long)]
+        remote: bool,
+    },
     Init {
         #[arg(long)]
         template: Option<String>,
@@ -140,6 +157,16 @@ pub fn run() -> Result<()> {
                     .run()
             }
         }
+        Cmd::Deploy {
+            repo,
+            local,
+            branch,
+            docker,
+            targets,
+            image,
+            dry_run,
+            remote,
+        } => run_deploy(repo, local, branch, docker, targets, image, dry_run, remote),
         Cmd::Init { template, yes } => init_project(template.as_deref(), yes),
         Cmd::Cache { cmd, config } => run_cache(cmd, &config),
         Cmd::Clean {
@@ -171,6 +198,133 @@ pub fn run() -> Result<()> {
     }
 }
 
+fn run_deploy(
+    repo: Option<String>,
+    local: bool,
+    branch: Option<String>,
+    docker: bool,
+    targets: Vec<String>,
+    image: Option<String>,
+    dry_run: bool,
+    remote: bool,
+) -> Result<()> {
+    if local && repo.is_some() {
+        bail!("use either positional <repo> or --local, not both");
+    }
+    if branch.is_some() && (local || repo.is_none()) {
+        bail!("--branch requires a git repo deploy target");
+    }
+
+    let git_repo = if local { None } else { repo };
+    let project_name = git_repo
+        .as_deref()
+        .map(project_name_from_repo)
+        .unwrap_or_else(local_project_name);
+
+    let explicit_targets = !targets.is_empty();
+    let mut normalized_targets = if targets.is_empty() {
+        vec!["directory".to_string()]
+    } else {
+        targets
+            .iter()
+            .map(|t| normalize_target(t))
+            .collect::<Vec<_>>()
+    };
+    let target_requires_container = normalized_targets
+        .iter()
+        .any(|t| t == "container_image" || t == "kubernetes");
+    let inferred_container = infer_deploy_container_need(git_repo.as_deref())?;
+    let should_use_container =
+        docker || target_requires_container || (!docker && !explicit_targets && inferred_container);
+
+    if should_use_container && !normalized_targets.iter().any(|t| t == "container_image") {
+        normalized_targets.push("container_image".to_string());
+    }
+    if normalized_targets.is_empty() {
+        normalized_targets.push("directory".to_string());
+    }
+
+    if dry_run {
+        println!("sendbuilds deploy dry-run");
+        println!("repo: {}", git_repo.as_deref().unwrap_or("local-workspace"));
+        println!("branch: {}", branch.as_deref().unwrap_or("default"));
+        println!("remote: {}", if remote { "requested" } else { "disabled" });
+        println!("project: {}", project_name);
+        let image_tag = image.unwrap_or_else(|| format!("{project_name}:latest"));
+        println!("image: {}", image_tag);
+        println!("targets: {}", normalized_targets.join(", "));
+        println!(
+            "container mode: {}",
+            if should_use_container {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!("planned steps:");
+        for step in [
+            "clone repo",
+            "detect language/framework",
+            "install dependencies",
+            "build project",
+            "generate SBOM + supply-chain metadata",
+            "run vulnerability/security scan",
+            "build container image (if target includes container_image)",
+            "sign artifacts/provenance",
+            "publish artifacts/deploy targets",
+        ] {
+            println!("- {step}");
+        }
+        return Ok(());
+    }
+
+    if remote {
+        println!("--remote requested; cloud workers are not configured yet, running locally.");
+    }
+
+    let image_tag = image.unwrap_or_else(|| format!("{project_name}:latest"));
+    let in_place = git_repo.is_none();
+    run_quick_build_with_options(
+        git_repo,
+        branch,
+        should_use_container,
+        Some(image_tag),
+        in_place,
+        None,
+        None,
+        Some(false),
+        Some(normalized_targets),
+        false,
+    )
+}
+
+fn infer_deploy_container_need(git_repo: Option<&str>) -> Result<bool> {
+    if let Ok(cfg) = BuildConfig::from_file("sendbuild.toml") {
+        let from_cfg = cfg
+            .deploy
+            .targets
+            .as_ref()
+            .map(|targets| {
+                targets.iter().any(|t| {
+                    let n = normalize_target(t);
+                    n == "container_image" || n == "kubernetes"
+                })
+            })
+            .unwrap_or(false);
+        if from_cfg {
+            return Ok(true);
+        }
+    }
+
+    if git_repo.is_none() {
+        let cwd = env::current_dir()?;
+        if cwd.join("Dockerfile").exists() || cwd.join("docker-compose.yml").exists() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn run_quick_build(
     git_repo: Option<String>,
     git_branch: Option<String>,
@@ -189,6 +343,7 @@ fn run_quick_build(
         events,
         None,
         None,
+        None,
         reproducible,
     )
 }
@@ -202,6 +357,7 @@ fn run_quick_build_with_options(
     events: Option<bool>,
     rebase_base: Option<String>,
     fail_on_scanner_unavailable: Option<bool>,
+    explicit_targets: Option<Vec<String>>,
     reproducible: bool,
 ) -> Result<()> {
     let has_git = git_repo.is_some();
@@ -209,11 +365,12 @@ fn run_quick_build_with_options(
         .as_deref()
         .map(project_name_from_repo)
         .unwrap_or_else(|| local_project_name());
-    let image_tag = image.unwrap_or_else(|| format!("{name}:latest"));
-    let mut targets = vec!["directory".to_string()];
-    if docker {
+    let mut targets = explicit_targets.unwrap_or_else(|| vec!["directory".to_string()]);
+    if docker && !targets.iter().any(|t| t == "container_image") {
         targets.push("container_image".to_string());
     }
+    let wants_container = targets.iter().any(|t| t == "container_image");
+    let image_tag = image.unwrap_or_else(|| format!("{name}:latest"));
 
     let cfg = BuildConfig {
         project: ProjectConfig {
@@ -229,7 +386,11 @@ fn run_quick_build_with_options(
         deploy: DeployConfig {
             artifact_dir: "./artifacts".to_string(),
             targets: Some(targets),
-            container_image: Some(image_tag),
+            container_image: if wants_container {
+                Some(image_tag)
+            } else {
+                None
+            },
             container_platforms: None,
             // quick builds ofc
             push_container: Some(false),
@@ -316,6 +477,16 @@ fn project_name_from_repo(repo: &str) -> String {
         "app".to_string()
     } else {
         normalized
+    }
+}
+
+fn normalize_target(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "docker" | "container" | "container-image" => "container_image".to_string(),
+        "k8s" => "kubernetes".to_string(),
+        "zip" | "serverless" => "serverless_zip".to_string(),
+        "dir" => "directory".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -755,6 +926,7 @@ fn run_rebase(
             None,
             runtime_base,
             Some(false),
+            None,
             false,
         );
     }

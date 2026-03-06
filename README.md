@@ -83,6 +83,7 @@ sendbuilds build [--config sendbuild.toml] [--events true|false]
 sendbuilds build [--config sendbuild.toml] [--in-place] [--events true|false]
 sendbuilds build [--config sendbuild.toml] [--reproducible]
 sendbuilds build --git <repo> --docker [--branch <name>] [--image <tag>]
+sendbuilds deploy [<owner/repo|git-url>] [--local] [--branch <name>] [--docker] [--target <kubernetes|serverless|tarball|directory|container_image>] [--image <tag>] [--dry-run] [--remote]
 sendbuilds init [--template <framework>] [--yes]
 sendbuilds cache save|restore|clear|status [--config sendbuild.toml]
 sendbuilds clean [--all] [--cache-only] [--config sendbuild.toml]
@@ -98,6 +99,34 @@ Accepted repo formats include:
 - `owner/repo` (for example `notsliver/sendara-landing`)
 - `https://github.com/owner/repo`
 - `https://github.com/owner/repo.git`
+
+## Build Any Repo In One Command
+
+```bash
+sendbuilds deploy owner/repo
+```
+
+This is a one-command wrapper around the full build+deploy pipeline (clone, detect, install, build, SBOM/security, image/sign, publish).
+
+Examples:
+
+```bash
+sendbuilds deploy owner/repo --docker --target kubernetes
+sendbuilds deploy owner/repo --branch main --target tarball
+sendbuilds deploy owner/repo --dry-run
+sendbuilds deploy --local --target tarball
+```
+
+Flags:
+- `--docker`: ensure container image output is produced
+- `--target`: select publish targets (`kubernetes`, `serverless`, `tarball`, `directory`, `container_image`)
+- `--dry-run`: print planned steps without executing
+- `--branch`: deploy a specific branch
+- `--local`: deploy current workspace (no git clone required)
+- `--remote`: reserved for cloud workers; currently falls back to local execution
+
+Local deploy does not require Docker unless you request `--docker` or `--target container_image`.
+When no explicit Docker/target flags are set, `deploy` auto-detects container need (for example from `sendbuild.toml` targets or local Dockerfile presence) and otherwise runs local non-container flow.
 
 ## Rebase Base Images
 
