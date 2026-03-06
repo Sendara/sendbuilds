@@ -166,9 +166,7 @@ pub fn verify_manifest_with_cosign(
     }
     ensure_cosign_available()?;
     let mut cmd = Command::new("cosign");
-    cmd.arg("verify-blob")
-        .arg("--signature")
-        .arg(sig_path);
+    cmd.arg("verify-blob").arg("--signature").arg(sig_path);
     apply_cosign_verify_blob_flags(&mut cmd, cert_path, options)?;
     let status = cmd.arg(manifest_path).status()?;
     if !status.success() {
@@ -270,7 +268,11 @@ fn dir_sha256(root: &Path, dir: &Path) -> Result<serde_json::Value> {
     }))
 }
 
-fn collect_dir_entries_for_digest(base: &Path, current: &Path, out: &mut Vec<String>) -> Result<()> {
+fn collect_dir_entries_for_digest(
+    base: &Path,
+    current: &Path,
+    out: &mut Vec<String>,
+) -> Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
@@ -439,7 +441,11 @@ fn run_cosign_sign(image: &str, options: &ProvenanceOptions) -> Result<()> {
     Ok(())
 }
 
-fn run_cosign_attest(image: &str, predicate_path: &Path, options: &ProvenanceOptions) -> Result<()> {
+fn run_cosign_attest(
+    image: &str,
+    predicate_path: &Path,
+    options: &ProvenanceOptions,
+) -> Result<()> {
     ensure_cosign_available()?;
     let mut cmd = Command::new("cosign");
     cmd.arg("attest")
@@ -497,11 +503,14 @@ fn apply_cosign_verify_identity_or_key_flags(
     options: &ProvenanceOptions,
 ) -> Result<()> {
     if options.cosign_keyless {
-        let identity = options.verify_certificate_identity.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "cosign keyless verification requires signing.verify_certificate_identity"
-            )
-        })?;
+        let identity = options
+            .verify_certificate_identity
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cosign keyless verification requires signing.verify_certificate_identity"
+                )
+            })?;
         let issuer = options
             .verify_certificate_oidc_issuer
             .as_deref()
@@ -534,11 +543,14 @@ fn apply_cosign_verify_blob_flags(
         let cert = cert_path.ok_or_else(|| {
             anyhow::anyhow!("cosign keyless blob verification requires a certificate path")
         })?;
-        let identity = options.verify_certificate_identity.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "cosign keyless verification requires signing.verify_certificate_identity"
-            )
-        })?;
+        let identity = options
+            .verify_certificate_identity
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cosign keyless verification requires signing.verify_certificate_identity"
+                )
+            })?;
         let issuer = options
             .verify_certificate_oidc_issuer
             .as_deref()

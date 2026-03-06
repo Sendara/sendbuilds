@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use getrandom::getrandom;
+use serde_json::Value;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,8 @@ enum Cmd {
         config: String,
         #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
         events: Option<bool>,
+        #[arg(long)]
+        reproducible: bool,
         #[arg(long)]
         in_place: bool,
         #[arg(long)]
@@ -66,6 +69,30 @@ enum Cmd {
         #[arg(long)]
         dependencies: bool,
     },
+    Rebase {
+        #[arg(short, long, default_value = "sendbuild.toml")]
+        config: String,
+        #[arg(long)]
+        git: bool,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long, default_value = ".")]
+        context: String,
+        #[arg(long)]
+        dockerfile: Option<String>,
+        #[arg(long)]
+        image: Option<String>,
+        #[arg(long = "from-image")]
+        from_image: Option<String>,
+        #[arg(long = "base")]
+        base: Option<String>,
+        #[arg(long = "platform", value_delimiter = ',')]
+        platforms: Vec<String>,
+        #[arg(long)]
+        push: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -82,6 +109,7 @@ pub fn run() -> Result<()> {
         Cmd::Build {
             config,
             events,
+            reproducible,
             in_place,
             git,
             branch,
@@ -89,7 +117,7 @@ pub fn run() -> Result<()> {
             image,
         } => {
             if git.is_some() || docker {
-                return run_quick_build(git, branch, docker, image, in_place, events);
+                return run_quick_build(git, branch, docker, image, in_place, events, reproducible);
             }
             if BuildConfig::exists(&config) {
                 let cfg = BuildConfig::from_file(&config)?;
@@ -97,6 +125,7 @@ pub fn run() -> Result<()> {
                 BuildEngine::from_config(cfg)
                     .with_in_place(in_place)
                     .with_events(events)
+                    .with_reproducible(reproducible)
                     .run()
             } else {
                 println!(
@@ -107,6 +136,7 @@ pub fn run() -> Result<()> {
                 BuildEngine::from_config(cfg)
                     .with_in_place(true)
                     .with_events(events)
+                    .with_reproducible(reproducible)
                     .run()
             }
         }
@@ -122,6 +152,22 @@ pub fn run() -> Result<()> {
             env,
             dependencies,
         } => info(&config, env, dependencies),
+        Cmd::Rebase {
+            config,
+            git,
+            repo,
+            branch,
+            context,
+            dockerfile,
+            image,
+            from_image,
+            base,
+            platforms,
+            push,
+        } => run_rebase(
+            &config, git, repo, branch, &context, dockerfile, image, from_image, base, platforms,
+            push,
+        ),
     }
 }
 
@@ -132,6 +178,31 @@ fn run_quick_build(
     image: Option<String>,
     in_place: bool,
     events: Option<bool>,
+    reproducible: bool,
+) -> Result<()> {
+    run_quick_build_with_options(
+        git_repo,
+        git_branch,
+        docker,
+        image,
+        in_place,
+        events,
+        None,
+        None,
+        reproducible,
+    )
+}
+
+fn run_quick_build_with_options(
+    git_repo: Option<String>,
+    git_branch: Option<String>,
+    docker: bool,
+    image: Option<String>,
+    in_place: bool,
+    events: Option<bool>,
+    rebase_base: Option<String>,
+    fail_on_scanner_unavailable: Option<bool>,
+    reproducible: bool,
 ) -> Result<()> {
     let has_git = git_repo.is_some();
     let name = git_repo
@@ -162,7 +233,7 @@ fn run_quick_build(
             container_platforms: None,
             // quick builds ofc
             push_container: Some(false),
-            rebase_base: None,
+            rebase_base,
             kubernetes: None,
             gc: None,
         },
@@ -180,7 +251,7 @@ fn run_quick_build(
             enabled: Some(true),
             fail_on_critical: Some(true),
             critical_threshold: Some(0),
-            fail_on_scanner_unavailable: Some(true),
+            fail_on_scanner_unavailable: Some(fail_on_scanner_unavailable.unwrap_or(true)),
             generate_sbom: Some(true),
             auto_distroless: Some(true),
             distroless_base: None,
@@ -213,6 +284,7 @@ fn run_quick_build(
     BuildEngine::from_config(cfg)
         .with_in_place(in_place || !has_git)
         .with_events(events)
+        .with_reproducible(reproducible)
         .run()
 }
 
@@ -633,6 +705,228 @@ fn info(config_path: &str, show_env: bool, show_deps: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_rebase(
+    config_path: &str,
+    git: bool,
+    repo: Option<String>,
+    branch: Option<String>,
+    context: &str,
+    dockerfile: Option<String>,
+    image: Option<String>,
+    from_image: Option<String>,
+    base: Option<String>,
+    platforms: Vec<String>,
+    push: bool,
+) -> Result<()> {
+    let cfg = BuildConfig::from_file(config_path).ok();
+
+    if git || repo.is_some() {
+        let repo_ref = repo
+            .or_else(|| cfg.as_ref().and_then(|c| c.source.as_ref().map(|s| s.repo.clone())))
+            .or_else(local_git_remote_url)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rebase --git requires a repository source. set --repo, [source].repo, or configure git remote.origin.url"
+                )
+            })?;
+        let branch_ref = branch.or_else(|| {
+            cfg.as_ref()
+                .and_then(|c| c.source.as_ref().and_then(|s| s.branch.clone()))
+        });
+        let target_image = image
+            .or_else(|| cfg.as_ref().and_then(|c| c.deploy.container_image.clone()))
+            .unwrap_or_else(|| format!("{}:latest", project_name_from_repo(&repo_ref)));
+        let runtime_base = base.or_else(|| cfg.as_ref().and_then(|c| c.deploy.rebase_base.clone()));
+
+        ensure_local_image_cache(&target_image);
+
+        println!(
+            "Rebase git mode: rebuilding full image from `{}` as `{}`.",
+            repo_ref, target_image
+        );
+        return run_quick_build_with_options(
+            Some(repo_ref),
+            branch_ref,
+            true,
+            Some(target_image),
+            false,
+            None,
+            runtime_base,
+            Some(false),
+            false,
+        );
+    }
+
+    let context_path = PathBuf::from(context);
+    if !context_path.exists() {
+        bail!("rebase context does not exist: {}", context_path.display());
+    }
+
+    let target_image = image
+        .or_else(|| cfg.as_ref().and_then(|c| c.deploy.container_image.clone()))
+        .unwrap_or_else(|| format!("{}:rebased", local_project_name()));
+    let cache_from = from_image.or_else(|| Some(target_image.clone()));
+    let runtime_base = base
+        .or_else(|| cfg.as_ref().and_then(|c| c.deploy.rebase_base.clone()))
+        .or_else(|| read_runtime_base_from_plan(&context_path))
+        .filter(|v| !v.trim().is_empty() && v != "auto")
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing runtime base. set --base <image>, [deploy].rebase_base, or .sendbuild-rebase-plan.json"
+            )
+        })?;
+
+    let dockerfile_path = resolve_rebase_dockerfile(&context_path, dockerfile.as_deref())?;
+
+    let docker_available = Command::new("docker")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !docker_available {
+        bail!("docker not available");
+    }
+
+    let normalized_platforms = platforms
+        .iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>();
+
+    let buildx_available = Command::new("docker")
+        .args(["buildx", "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let status = if buildx_available {
+        if normalized_platforms.len() > 1 && !push {
+            bail!("multi-arch rebase requires --push (buildx cannot --load multiple platforms)");
+        }
+        let mut cmd = Command::new("docker");
+        cmd.arg("buildx")
+            .arg("build")
+            .arg("--target")
+            .arg("launch")
+            .arg("--build-arg")
+            .arg(format!("RUNTIME_BASE={runtime_base}"))
+            .arg("-t")
+            .arg(&target_image)
+            .arg("--file")
+            .arg(&dockerfile_path);
+        if let Some(cache) = cache_from.as_deref() {
+            cmd.arg("--cache-from").arg(cache);
+        }
+        if !normalized_platforms.is_empty() {
+            cmd.arg("--platform").arg(normalized_platforms.join(","));
+        }
+        if push {
+            cmd.arg("--push");
+        } else {
+            cmd.arg("--load");
+        }
+        cmd.arg(&context_path).status()?
+    } else {
+        if !normalized_platforms.is_empty() || push {
+            bail!("docker buildx is required for --platform/--push rebase options");
+        }
+        let mut cmd = Command::new("docker");
+        cmd.arg("build")
+            .arg("--target")
+            .arg("launch")
+            .arg("--build-arg")
+            .arg(format!("RUNTIME_BASE={runtime_base}"))
+            .arg("-t")
+            .arg(&target_image)
+            .arg("--file")
+            .arg(&dockerfile_path);
+        if let Some(cache) = cache_from.as_deref() {
+            cmd.arg("--cache-from").arg(cache);
+        }
+        cmd.arg(&context_path).status()?
+    };
+
+    if !status.success() {
+        bail!("docker rebase build failed");
+    }
+
+    println!(
+        "Rebased image `{}` using runtime base `{}` (cache-from: {}).",
+        target_image,
+        runtime_base,
+        cache_from.as_deref().unwrap_or("none")
+    );
+    Ok(())
+}
+
+fn resolve_rebase_dockerfile(context: &Path, provided: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = provided {
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            bail!("dockerfile not found: {}", path.display());
+        }
+        return Ok(path);
+    }
+
+    let layered = context.join("Dockerfile.sendbuild.layered");
+    if layered.exists() {
+        return Ok(layered);
+    }
+
+    let dockerfile = context.join("Dockerfile");
+    if dockerfile.exists() {
+        let data = fs::read_to_string(&dockerfile).unwrap_or_default();
+        if data
+            .to_lowercase()
+            .contains("# sendbuilds: layered rebase-ready dockerfile")
+        {
+            return Ok(dockerfile);
+        }
+    }
+
+    bail!(
+        "could not find a sendbuilds layered dockerfile in `{}`. run `sendbuilds build --docker` first or pass --dockerfile",
+        context.display()
+    )
+}
+
+fn read_runtime_base_from_plan(context: &Path) -> Option<String> {
+    let plan_path = context.join(".sendbuild-rebase-plan.json");
+    let plan = fs::read_to_string(plan_path).ok()?;
+    let json: Value = serde_json::from_str(&plan).ok()?;
+    json.get("runtime_base")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+fn local_git_remote_url() -> Option<String> {
+    let out = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
+fn ensure_local_image_cache(image: &str) {
+    let local_exists = Command::new("docker")
+        .args(["image", "inspect", image])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if local_exists {
+        return;
+    }
+    let _ = Command::new("docker").args(["pull", image]).status();
 }
 
 fn detect_framework(cwd: &Path) -> Option<String> {

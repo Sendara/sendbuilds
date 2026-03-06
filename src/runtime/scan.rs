@@ -210,10 +210,7 @@ fn npm_advisory_lines(info: &Value, max_items: usize) -> Vec<String> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_uppercase();
-        let url = obj
-            .get("url")
-            .and_then(Value::as_str)
-            .unwrap_or("no-url");
+        let url = obj.get("url").and_then(Value::as_str).unwrap_or("no-url");
         out.push(format!("{id} ({sev}): {url}"));
     }
     out

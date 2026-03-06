@@ -81,11 +81,14 @@ If `[source]` is omitted in `sendbuild.toml`, `sendbuilds` uses the current work
 ```bash
 sendbuilds build [--config sendbuild.toml] [--events true|false]
 sendbuilds build [--config sendbuild.toml] [--in-place] [--events true|false]
+sendbuilds build [--config sendbuild.toml] [--reproducible]
 sendbuilds build --git <repo> --docker [--branch <name>] [--image <tag>]
 sendbuilds init [--template <framework>] [--yes]
 sendbuilds cache save|restore|clear|status [--config sendbuild.toml]
 sendbuilds clean [--all] [--cache-only] [--config sendbuild.toml]
 sendbuilds info [--env] [--dependencies] [--config sendbuild.toml]
+sendbuilds rebase [--config sendbuild.toml] [--base <image>] [--image <tag>] [--from-image <tag-or-id>]
+sendbuilds rebase --git [--repo <git-url>] [--branch <name>] [--base <image>] [--image <tag>]
 ```
 
 Use `--in-place` to build directly in the current workspace instead of a temp copy (useful for Next.js `pnpm start` expecting `.next` in project root).
@@ -95,6 +98,52 @@ Accepted repo formats include:
 - `owner/repo` (for example `notsliver/sendara-landing`)
 - `https://github.com/owner/repo`
 - `https://github.com/owner/repo.git`
+
+## Rebase Base Images
+
+Update only the runtime/base layer for a sendbuilds layered Dockerfile without rebuilding everything.
+
+```bash
+sendbuilds rebase
+```
+
+Use an explicit runtime base and target image:
+
+```bash
+sendbuilds rebase --base gcr.io/distroless/nodejs20-debian12 --image my-app:rebased
+```
+
+Use a local tag or Docker image ID as cache source:
+
+```bash
+sendbuilds rebase --from-image my-app:latest --image my-app:rebased
+sendbuilds rebase --from-image sha256:0123456789abcdef --image my-app:rebased
+```
+
+If your layered Dockerfile is not in the current directory, pass `--context` and/or `--dockerfile`.
+
+Git mode does a full rebuild (same as `build --git --docker`) and infers the image from the git repo name when not provided:
+
+```bash
+sendbuilds rebase --git
+sendbuilds rebase --git --repo https://github.com/owner/repo --branch main
+```
+
+## Deterministic Reproducible Builds
+
+Use reproducible mode for stricter deterministic behavior:
+
+```bash
+sendbuilds build --reproducible
+```
+
+In reproducible mode, sendbuilds applies strict defaults:
+- Isolated env baseline (`TZ=UTC`, `LANG/LC_ALL=C`, `PYTHONHASHSEED=0`, `SOURCE_DATE_EPOCH`)
+- No host env passthrough (`env_from_host` ignored)
+- Strict sandbox mode
+- Build cache disabled
+- No install fallback retries (single deterministic install command)
+- Required lock/toolchain files enforced (for example `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml`, `Cargo.lock`, `go.sum`, `Gemfile.lock`, `composer.lock`, `.NET global.json`)
 
 ## Minimal config
 
@@ -220,6 +269,7 @@ EVENT {"type":"STEP_FAILED","channel":"build-step","step":"build","status":"fail
 14. Registry-backed container cache/export: optional buildx `--cache-from/--cache-to` via `[cache].registry_ref`.
 15. First-class multi-arch container builds: optional `container_platforms` with buildx push flow.
 16. Provenance attestations and cosign integration: emits `provenance.intoto.jsonl`; optional cosign sign/attest.
+17. Deterministic reproducible mode: `build --reproducible` enforces locked inputs, isolated env, strict sandboxing, and deterministic install behavior.
 
 ## Security scan failure details
 

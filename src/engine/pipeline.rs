@@ -23,6 +23,7 @@ pub struct BuildEngine {
     config: BuildConfig,
     in_place: bool,
     events_override: Option<bool>,
+    reproducible: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,6 +56,7 @@ impl BuildEngine {
             config,
             in_place: false,
             events_override: None,
+            reproducible: false,
         }
     }
 
@@ -73,6 +75,11 @@ impl BuildEngine {
         self
     }
 
+    pub fn with_reproducible(mut self, reproducible: bool) -> Self {
+        self.reproducible = reproducible;
+        self
+    }
+
     pub fn run(self) -> Result<()> {
         let cfg = &self.config;
         let events_enabled = self
@@ -83,7 +90,11 @@ impl BuildEngine {
 
         let env_map = self.resolve_env();
         let sandbox_enabled = cfg.sandbox.as_ref().and_then(|s| s.enabled).unwrap_or(true);
-        let sandbox_strict = cfg.sandbox.as_ref().and_then(|s| s.strict).unwrap_or(false);
+        let sandbox_strict = if self.reproducible {
+            true
+        } else {
+            cfg.sandbox.as_ref().and_then(|s| s.strict).unwrap_or(false)
+        };
         shell::set_sandbox_strict(sandbox_enabled && sandbox_strict);
         let work_dir = if self.in_place && cfg.source.is_none() {
             std::env::current_dir()?
@@ -123,6 +134,14 @@ impl BuildEngine {
                 } else {
                     "enabled"
                 }
+            } else {
+                "disabled"
+            },
+        );
+        log::kv(
+            "reproducible",
+            if self.reproducible {
+                "enabled"
             } else {
                 "disabled"
             },
@@ -167,6 +186,13 @@ impl BuildEngine {
         steps.push(self.execute_step(&ctx, "compatibility-check", |_e, c, s| {
             self.step_compat(c, s)
         })?);
+        if self.reproducible {
+            steps.push(
+                self.execute_step(&ctx, "reproducibility-check", |_e, c, s| {
+                    self.reproducibility_check(c, &resolved_language, s)
+                })?,
+            );
+        }
 
         if let Some(c) = &cache {
             steps.push(
@@ -543,11 +569,7 @@ impl BuildEngine {
                     let provenance_options = signing::ProvenanceOptions {
                         project_name: cfg.project.name.clone(),
                         container_image: cfg.deploy.container_image.clone(),
-                        cosign: cfg
-                            .signing
-                            .as_ref()
-                            .and_then(|s| s.cosign)
-                            .unwrap_or(false),
+                        cosign: cfg.signing.as_ref().and_then(|s| s.cosign).unwrap_or(false),
                         cosign_key: cfg.signing.as_ref().and_then(|s| s.cosign_key.clone()),
                         cosign_keyless: cfg
                             .signing
@@ -592,11 +614,8 @@ impl BuildEngine {
                         .and_then(|s| s.generate_provenance)
                         .unwrap_or(true);
                     if generate_provenance {
-                        let provenance = signing::write_provenance(
-                            &p.root,
-                            &p.outputs,
-                            &provenance_options,
-                        )?;
+                        let provenance =
+                            signing::write_provenance(&p.root, &p.outputs, &provenance_options)?;
                         step.push_log(format!("provenance {}", provenance.display()));
                         if provenance_options.verify_after_sign && provenance_options.cosign {
                             step.push_log("cosign image verification passed".to_string());
@@ -710,12 +729,24 @@ impl BuildEngine {
                 out.insert(k.clone(), v.clone());
             }
         }
-        if let Some(host) = &self.config.env_from_host {
-            for key in host {
-                if let Ok(v) = std::env::var(key) {
-                    out.insert(key.clone(), v);
+        if !self.reproducible {
+            if let Some(host) = &self.config.env_from_host {
+                for key in host {
+                    if let Ok(v) = std::env::var(key) {
+                        out.insert(key.clone(), v);
+                    }
                 }
             }
+        } else {
+            out.insert("TZ".to_string(), "UTC".to_string());
+            out.insert("LANG".to_string(), "C".to_string());
+            out.insert("LC_ALL".to_string(), "C".to_string());
+            out.insert("PYTHONHASHSEED".to_string(), "0".to_string());
+            out.insert("DOTNET_CLI_TELEMETRY_OPTOUT".to_string(), "1".to_string());
+            out.insert(
+                "SOURCE_DATE_EPOCH".to_string(),
+                std::env::var("SOURCE_DATE_EPOCH").unwrap_or_else(|_| "0".to_string()),
+            );
         }
         out
     }
@@ -799,6 +830,9 @@ impl BuildEngine {
     }
 
     fn configure_cache(&self, ctx: &BuildContext) -> Result<Option<BuildCache>> {
+        if self.reproducible {
+            return Ok(None);
+        }
         let enabled = self
             .config
             .cache
@@ -858,6 +892,21 @@ impl BuildEngine {
         sandbox: bool,
         step: &mut Step,
     ) -> Result<shell::ShellRunOutput> {
+        if self.reproducible {
+            let run = shell::run_allow_failure(cmd, wd, env, sandbox)?;
+            for line in &run.logs {
+                step.push_log(line.clone());
+                log::pipe(line);
+            }
+            if run.success {
+                return Ok(run);
+            }
+            bail!(
+                "install failed in reproducible mode (no fallback allowed). cmd=`{}` exit={:?}",
+                shell::redact_command_for_log(cmd),
+                run.exit_code
+            );
+        }
         let candidates = self.install_fallback_candidates(cmd);
         let mut failures = Vec::new();
         for (i, c) in candidates.iter().enumerate() {
@@ -922,6 +971,55 @@ impl BuildEngine {
             }
         }
         true
+    }
+
+    fn reproducibility_check(
+        &self,
+        ctx: &BuildContext,
+        language: &str,
+        step: &mut Step,
+    ) -> Result<()> {
+        let wd = &ctx.work_dir;
+        if wd.join("package.json").exists() {
+            let node_locks = ["pnpm-lock.yaml", "yarn.lock", "package-lock.json"]
+                .iter()
+                .filter(|n| wd.join(n).exists())
+                .count();
+            if node_locks != 1 {
+                bail!(
+                    "reproducible mode requires exactly one Node lockfile (pnpm-lock.yaml, yarn.lock, or package-lock.json)"
+                );
+            }
+            step.push_log("node lockfile check passed".to_string());
+        }
+
+        if wd.join("Cargo.toml").exists() && !wd.join("Cargo.lock").exists() {
+            bail!("reproducible mode requires Cargo.lock for Rust projects");
+        }
+        if wd.join("go.mod").exists() && !wd.join("go.sum").exists() {
+            bail!("reproducible mode requires go.sum for Go projects");
+        }
+        if wd.join("composer.json").exists() && !wd.join("composer.lock").exists() {
+            bail!("reproducible mode requires composer.lock for PHP projects");
+        }
+        if wd.join("Gemfile").exists() && !wd.join("Gemfile.lock").exists() {
+            bail!("reproducible mode requires Gemfile.lock for Ruby projects");
+        }
+        if wd.join("pyproject.toml").exists()
+            && !wd.join("poetry.lock").exists()
+            && !wd.join("requirements.txt").exists()
+        {
+            bail!(
+                "reproducible mode requires poetry.lock or requirements.txt when pyproject.toml is present"
+            );
+        }
+
+        if language == "dotnet" && !wd.join("global.json").exists() {
+            bail!("reproducible mode requires global.json for .NET SDK pinning");
+        }
+
+        step.push_log("reproducibility checks passed".to_string());
+        Ok(())
     }
 
     fn infer_install_cmd(&self, wd: &Path) -> Result<String> {
