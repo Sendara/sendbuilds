@@ -85,7 +85,8 @@ sendbuilds build [--config sendbuild.toml] [--reproducible]
 sendbuilds build --git <repo> --docker [--branch <name>] [--image <tag>]
 sendbuilds deploy [<owner/repo|git-url>] [--local] [--build] [--branch <name>] [--docker] [--target <kubernetes|serverless|tarball|directory|container_image>] [--image <tag>] [--dry-run] [--remote]
 sendbuilds debug <build-id> [--config sendbuild.toml]
-sendbuilds replay <build-id> [--config sendbuild.toml]
+sendbuilds replay [<build-id>] [--buildid <build-id>] [--time-machine <date>] [--config sendbuild.toml]
+sendbuilds rollback [<build-id>] [--to <date>] [--config sendbuild.toml]
 sendbuilds artifacts list [--all] [--limit <n>] [--config sendbuild.toml]
 sendbuilds artifacts prune [--keep-last <n>] [--max-age <days>] [--config sendbuild.toml]
 sendbuilds artifacts download <artifact> [--out <path>] [--config sendbuild.toml]
@@ -163,6 +164,21 @@ Replay deploy from a build-id (starts container artifact if present, otherwise s
 
 ```bash
 sendbuilds replay 20260306_210619
+```
+
+Time-travel replay by date/time:
+
+```bash
+sendbuilds replay --time-machine 2026-03-06
+sendbuilds replay --time-machine "2026-03-06 21:25:31"
+sendbuilds replay --time-machine "2026-03-06T21:25:31+01:00"
+```
+
+Rollback shortcuts:
+
+```bash
+sendbuilds rollback 20260306_210619
+sendbuilds rollback --to 2026-03-06
 ```
 
 ## Rebase Base Images

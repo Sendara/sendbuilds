@@ -64,9 +64,8 @@ pub fn publish(
     container_options: Option<&ContainerPublishOptions>,
     kubernetes: Option<&KubernetesConfig>,
 ) -> Result<PublishResult> {
-    let stamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-    let root = base_dir.join(stamp);
-    fs::create_dir_all(&root)?;
+    fs::create_dir_all(base_dir)?;
+    let root = create_unique_build_root(base_dir)?;
 
     let selected = if targets.is_empty() {
         vec!["directory".to_string()]
@@ -127,6 +126,24 @@ pub fn publish(
         outputs,
         warnings,
     })
+}
+
+fn create_unique_build_root(base_dir: &Path) -> Result<PathBuf> {
+    for attempt in 0..1000u32 {
+        let stamp = Local::now().format("%Y%m%d_%H%M%S%3f").to_string();
+        let id = if attempt == 0 {
+            stamp
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let root = base_dir.join(id);
+        match fs::create_dir(&root) {
+            Ok(()) => return Ok(root),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err).with_context(|| format!("creating {}", root.display())),
+        }
+    }
+    anyhow::bail!("unable to create unique build id after 1000 attempts")
 }
 
 pub fn garbage_collect_artifacts(

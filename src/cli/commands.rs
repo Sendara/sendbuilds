@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use clap::{Parser, Subcommand};
 use getrandom::getrandom;
 use serde_json::Value;
@@ -68,7 +69,20 @@ enum Cmd {
         config: String,
     },
     Replay {
-        build_id: String,
+        #[arg(value_name = "build-id")]
+        build_id: Option<String>,
+        #[arg(long = "buildid", visible_alias = "build-id")]
+        buildid: Option<String>,
+        #[arg(long = "time-machine", visible_alias = "to")]
+        time_machine: Option<String>,
+        #[arg(short, long, default_value = "sendbuild.toml")]
+        config: String,
+    },
+    Rollback {
+        #[arg(value_name = "build-id")]
+        build_id: Option<String>,
+        #[arg(long = "to")]
+        to: Option<String>,
         #[arg(short, long, default_value = "sendbuild.toml")]
         config: String,
     },
@@ -212,7 +226,17 @@ pub fn run() -> Result<()> {
             repo, local, build, branch, docker, targets, image, dry_run, remote,
         ),
         Cmd::Debug { build_id, config } => run_debug(&build_id, &config),
-        Cmd::Replay { build_id, config } => run_replay(&build_id, &config),
+        Cmd::Replay {
+            build_id,
+            buildid,
+            time_machine,
+            config,
+        } => run_replay(build_id, buildid, time_machine, &config),
+        Cmd::Rollback {
+            build_id,
+            to,
+            config,
+        } => run_rollback(build_id, to, &config),
         Cmd::Artifacts { cmd, config } => run_artifacts(cmd, &config),
         Cmd::Init { template, yes } => init_project(template.as_deref(), yes),
         Cmd::Cache { cmd, config } => run_cache(cmd, &config),
@@ -458,7 +482,23 @@ fn run_debug(build_id: &str, config_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_replay(build_id: &str, config_path: &str) -> Result<()> {
+fn run_replay(
+    build_id_positional: Option<String>,
+    build_id_flag: Option<String>,
+    time_machine: Option<String>,
+    config_path: &str,
+) -> Result<()> {
+    let selected = select_build_id(build_id_positional, build_id_flag, time_machine, config_path)?;
+    run_replay_selected(&selected, config_path)
+}
+
+fn run_rollback(build_id: Option<String>, to: Option<String>, config_path: &str) -> Result<()> {
+    let selected = select_build_id(build_id, None, to, config_path)?;
+    println!("Rolling back to build `{}`", selected);
+    run_replay_selected(&selected, config_path)
+}
+
+fn run_replay_selected(build_id: &str, config_path: &str) -> Result<()> {
     let artifact_base = resolve_artifact_base(config_path)?;
     let root = resolve_build_root(&artifact_base, build_id)?;
     println!(
@@ -484,6 +524,112 @@ fn run_replay(build_id: &str, config_path: &str) -> Result<()> {
         "replay failed: no runnable artifact found for build-id `{}`",
         build_id
     )
+}
+
+fn select_build_id(
+    build_id_positional: Option<String>,
+    build_id_flag: Option<String>,
+    time_machine: Option<String>,
+    config_path: &str,
+) -> Result<String> {
+    let positional = build_id_positional.map(|s| s.trim().to_string());
+    let flag = build_id_flag.map(|s| s.trim().to_string());
+    let by_id = match (positional, flag) {
+        (Some(a), Some(b)) => {
+            if a != b {
+                bail!("conflicting build-id values: positional `{}` vs --buildid `{}`", a, b);
+            }
+            Some(a)
+        }
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+
+    if let Some(id) = by_id {
+        if id.is_empty() {
+            bail!("build-id cannot be empty");
+        }
+        if time_machine.is_some() {
+            bail!("use either build-id or --time-machine/--to, not both");
+        }
+        return Ok(id);
+    }
+
+    let tm = time_machine
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing build target: provide <build-id> or --time-machine/--to"))?;
+    select_build_id_for_time_machine(config_path, &tm)
+}
+
+fn select_build_id_for_time_machine(config_path: &str, time_machine: &str) -> Result<String> {
+    let artifact_base = resolve_artifact_base(config_path)?;
+    let builds = list_build_dirs(&artifact_base)?;
+    if builds.is_empty() {
+        bail!(
+            "no artifacts found under {}",
+            normalize_display_path(&artifact_base)
+        );
+    }
+    let target = parse_time_machine_to_system_time(time_machine)?;
+    let mut best: Option<(PathBuf, SystemTime)> = None;
+    for build in builds {
+        let modified = build
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if modified <= target {
+            match &best {
+                Some((_, current)) if modified <= *current => {}
+                _ => best = Some((build, modified)),
+            }
+        }
+    }
+    if let Some((path, _)) = best {
+        let id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("failed to read selected build id"))?;
+        println!("Time-machine selected build `{}` for `{}`", id, time_machine);
+        return Ok(id.to_string());
+    }
+    bail!(
+        "no build found at or before `{}` under {}",
+        time_machine,
+        normalize_display_path(&artifact_base)
+    )
+}
+
+fn parse_time_machine_to_system_time(input: &str) -> Result<SystemTime> {
+    if let Ok(dt_fixed) = DateTime::parse_from_rfc3339(input) {
+        let local = dt_fixed.with_timezone(&Local);
+        return Ok(system_time_from_local(local)?);
+    }
+    if let Ok(dt_local) = Local.datetime_from_str(input, "%Y-%m-%d %H:%M:%S") {
+        return Ok(system_time_from_local(dt_local)?);
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(input, "%Y-%m-%d") {
+        let local = Local
+            .with_ymd_and_hms(date.year(), date.month(), date.day(), 23, 59, 59)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("failed to resolve local date `{}`", input))?;
+        return Ok(system_time_from_local(local)?);
+    }
+    bail!(
+        "invalid --time-machine/--to value `{}`. expected RFC3339, `YYYY-MM-DD HH:MM:SS`, or `YYYY-MM-DD`",
+        input
+    )
+}
+
+fn system_time_from_local(dt: DateTime<Local>) -> Result<SystemTime> {
+    let ts = dt.timestamp();
+    if ts >= 0 {
+        Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(ts as u64))
+    } else {
+        Ok(SystemTime::UNIX_EPOCH - Duration::from_secs((-ts) as u64))
+    }
 }
 
 fn run_artifacts(cmd: ArtifactsCmd, config_path: &str) -> Result<()> {
@@ -656,17 +802,37 @@ fn list_build_dirs(artifact_base: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn is_build_id_dir_name(name: &str) -> bool {
-    // expected: YYYYMMDD_HHMMSS
-    if name.len() != 15 {
+    // legacy: YYYYMMDD_HHMMSS
+    // current: YYYYMMDD_HHMMSSmmm[-N]
+    if name.len() < 15 {
         return false;
     }
     let bytes = name.as_bytes();
-    for (idx, b) in bytes.iter().enumerate() {
-        if idx == 8 {
-            if *b != b'_' {
+    for (idx, b) in bytes.iter().enumerate().take(15) {
+        if idx == 8 && *b != b'_' {
+            return false;
+        }
+        if idx != 8 && !b.is_ascii_digit() {
+            return false;
+        }
+    }
+    if name.len() == 15 {
+        return true;
+    }
+    let suffix = &name[15..];
+    if suffix.len() < 3 {
+        return false;
+    }
+    let mut seen_dash = false;
+    for ch in suffix.chars() {
+        if ch == '-' {
+            if seen_dash {
                 return false;
             }
-        } else if !b.is_ascii_digit() {
+            seen_dash = true;
+            continue;
+        }
+        if !ch.is_ascii_digit() {
             return false;
         }
     }
