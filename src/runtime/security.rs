@@ -511,7 +511,7 @@ fn run_vulnerability_scan(
     env: &HashMap<String, String>,
     sandbox: bool,
 ) -> Result<VulnerabilitySummary> {
-    let candidates = scanner_candidates(language);
+    let candidates = scanner_candidates(language, work_dir);
     let mut unavailable = Vec::new();
     let mut attempts = Vec::new();
 
@@ -629,7 +629,7 @@ struct ScannerCandidate {
     parser: ScanParser,
 }
 
-fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
+fn scanner_candidates(language: &str, work_dir: &Path) -> Vec<ScannerCandidate> {
     match language {
         "nodejs" => vec![
             ScannerCandidate {
@@ -647,12 +647,27 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 command: "yarn npm audit --json",
                 parser: ScanParser::GenericJson,
             },
+            ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
         ],
         "python" => vec![
             ScannerCandidate {
                 scanner: "pip-audit",
                 command: "pip-audit -f json",
                 parser: ScanParser::PipAudit,
+            },
+            ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
             },
             ScannerCandidate {
                 scanner: "osv-scanner",
@@ -667,6 +682,11 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 parser: ScanParser::GenericJson,
             },
             ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
                 scanner: "osv-scanner",
                 command: "osv-scanner scan source -r . --format json",
                 parser: ScanParser::GenericJson,
@@ -679,29 +699,55 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 parser: ScanParser::GenericJson,
             },
             ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
                 scanner: "osv-scanner",
                 command: "osv-scanner scan source -r . --format json",
                 parser: ScanParser::GenericJson,
             },
         ],
-        "java" => vec![
-            ScannerCandidate {
+        "java" => {
+            let mut out = vec![];
+            if work_dir.join("pom.xml").exists() {
+                out.push(ScannerCandidate {
+                    scanner: "maven-dependency-check",
+                    command: "mvn -q -DskipTests org.owasp:dependency-check-maven:check -Dformat=JSON -DfailOnError=false",
+                    parser: ScanParser::GenericJson,
+                });
+            }
+            if work_dir.join("build.gradle").exists() || work_dir.join("build.gradle.kts").exists()
+            {
+                out.push(ScannerCandidate {
+                    scanner: "gradle-dependency-check",
+                    command: "./gradlew dependencyCheckAnalyze --console=plain -Dorg.gradle.daemon=false",
+                    parser: ScanParser::GenericJson,
+                });
+            }
+            out.push(ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            });
+            out.push(ScannerCandidate {
                 scanner: "osv-scanner",
                 command: "osv-scanner scan source -r . --format json",
                 parser: ScanParser::GenericJson,
-            },
-            ScannerCandidate {
-                scanner: "maven-dependency-check",
-                command:
-                    "mvn -q -DskipTests org.owasp:dependency-check-maven:check -Dformat=JSON -DfailOnError=false",
-                parser: ScanParser::GenericJson,
-            },
-        ],
+            });
+            out
+        }
         "php" => vec![
             ScannerCandidate {
                 scanner: "composer-audit",
                 command: "composer audit --format=json",
                 parser: ScanParser::ComposerAudit,
+            },
+            ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
             },
             ScannerCandidate {
                 scanner: "osv-scanner",
@@ -716,6 +762,11 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 parser: ScanParser::CargoAudit,
             },
             ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
                 scanner: "osv-scanner",
                 command: "osv-scanner scan source -r . --format json",
                 parser: ScanParser::GenericJson,
@@ -726,6 +777,11 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 scanner: "dotnet-audit",
                 command: "dotnet list package --vulnerable --include-transitive --format json",
                 parser: ScanParser::DotnetAudit,
+            },
+            ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
             },
             ScannerCandidate {
                 scanner: "osv-scanner",
@@ -740,6 +796,11 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 parser: ScanParser::GenericJson,
             },
             ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
                 scanner: "osv-scanner",
                 command: "osv-scanner scan source -r . --format json",
                 parser: ScanParser::GenericJson,
@@ -752,16 +813,28 @@ fn scanner_candidates(language: &str) -> Vec<ScannerCandidate> {
                 parser: ScanParser::GenericJson,
             },
             ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
                 scanner: "osv-scanner",
                 command: "osv-scanner scan source -r . --format json",
                 parser: ScanParser::GenericJson,
             },
         ],
-        "gleam" | "static" | "shell" | "c_cpp" => vec![ScannerCandidate {
-            scanner: "osv-scanner",
-            command: "osv-scanner scan source -r . --format json",
-            parser: ScanParser::GenericJson,
-        }],
+        "gleam" | "static" | "shell" | "c_cpp" => vec![
+            ScannerCandidate {
+                scanner: "trivy-fs",
+                command: "trivy fs --quiet --format json --scanners vuln,misconfig,secret .",
+                parser: ScanParser::Trivy,
+            },
+            ScannerCandidate {
+                scanner: "osv-scanner",
+                command: "osv-scanner scan source -r . --format json",
+                parser: ScanParser::GenericJson,
+            },
+        ],
         _ => vec![],
     }
 }
@@ -771,39 +844,46 @@ fn default_suggestions(language: &str) -> Vec<&'static str> {
         "nodejs" => vec![
             "Install npm or pnpm (Node.js toolchain) and rerun build",
             "Run npm audit fix (or pnpm audit --fix) to remediate vulnerable packages",
+            "Install trivy for full filesystem dependency/misconfig/secret scan fallback",
             "Ensure lockfile exists and dependencies are installed",
         ],
         "python" => vec![
             "Install pip-audit: pip install pip-audit",
             "Run pip-audit -f json manually and patch vulnerable packages",
+            "Install trivy for framework/runtime fallback scanning",
             "Commit updated requirements/lock files",
         ],
         "ruby" => vec![
             "Install bundler-audit gem and run bundle audit check --update",
+            "Install trivy for fallback vuln/misconfig/secret scanning",
             "Update Gemfile.lock with safe versions",
         ],
         "go" => vec![
             "Install govulncheck: go install golang.org/x/vuln/cmd/govulncheck@latest",
             "Run govulncheck ./... and update vulnerable modules",
+            "Install trivy for fallback scanning coverage",
         ],
         "java" => vec![
-            "Install osv-scanner or OWASP dependency-check plugin",
+            "For Maven use OWASP dependency-check plugin; for Gradle use dependencyCheckAnalyze",
+            "Install trivy for fallback scanning across Spring/Maven/Gradle projects",
             "Run scanner on pom.xml/gradle dependencies and update vulnerable artifacts",
         ],
         "php" => vec![
             "Use composer audit --format=json and update composer.lock",
-            "Install osv-scanner as fallback scanner",
+            "Install trivy or osv-scanner as fallback scanners",
         ],
         "rust" => vec![
             "Install cargo-audit: cargo install cargo-audit",
             "Run cargo audit --json and patch vulnerable crates",
+            "Install trivy for fallback scanning coverage",
         ],
         "dotnet" => vec![
             "Run dotnet list package --vulnerable --include-transitive --format json",
+            "Install trivy for fallback scanning across .NET projects",
             "Upgrade vulnerable NuGet packages",
         ],
         _ => vec![
-            "Install osv-scanner and rerun build",
+            "Install trivy and/or osv-scanner and rerun build",
             "Provide a custom [scan].command for your ecosystem",
         ],
     }

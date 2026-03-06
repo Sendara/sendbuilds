@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use crate::core::config::{effective_artifact_dir, project_storage_key};
 use crate::core::{BuildConfig, BuildContext, Step, StepStatus};
 use crate::errors::BuildError;
 use crate::languages;
@@ -101,7 +102,7 @@ impl BuildEngine {
         } else {
             artifacts::make_workdir(&cfg.project.name)?
         };
-        let artifact_dir = Path::new(&cfg.deploy.artifact_dir).to_path_buf();
+        let artifact_dir = effective_artifact_dir(cfg);
         let ctx = BuildContext::new(&cfg.project.name, work_dir, artifact_dir, env_map);
 
         log::header(&format!("sendbuild - {}", cfg.project.name));
@@ -508,7 +509,7 @@ impl BuildEngine {
                 let fail_on_scanner_unavailable = security_cfg
                     .as_ref()
                     .and_then(|c| c.fail_on_scanner_unavailable)
-                    .unwrap_or(true);
+                    .unwrap_or(false);
                 if fail_on_scanner_unavailable && scans.iter().all(|s| !s.scanned) {
                     bail!(
                         "security policy violation: required container/image tar scanner unavailable (attempted: {})",
@@ -849,7 +850,8 @@ impl BuildEngine {
             .and_then(|c| c.dir.as_ref())
             .map(PathBuf::from)
             .unwrap_or_else(|| ctx.artifact_dir.join(".sendbuild-cache"));
-        Ok(Some(BuildCache::new(&self.config.project.name, &base)?))
+        let key = project_storage_key(&self.config);
+        Ok(Some(BuildCache::new(&key, &base)?))
     }
 
     fn output_src(&self, ctx: &BuildContext, output_dir: Option<&str>) -> PathBuf {

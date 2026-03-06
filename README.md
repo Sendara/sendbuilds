@@ -83,7 +83,12 @@ sendbuilds build [--config sendbuild.toml] [--events true|false]
 sendbuilds build [--config sendbuild.toml] [--in-place] [--events true|false]
 sendbuilds build [--config sendbuild.toml] [--reproducible]
 sendbuilds build --git <repo> --docker [--branch <name>] [--image <tag>]
-sendbuilds deploy [<owner/repo|git-url>] [--local] [--branch <name>] [--docker] [--target <kubernetes|serverless|tarball|directory|container_image>] [--image <tag>] [--dry-run] [--remote]
+sendbuilds deploy [<owner/repo|git-url>] [--local] [--build] [--branch <name>] [--docker] [--target <kubernetes|serverless|tarball|directory|container_image>] [--image <tag>] [--dry-run] [--remote]
+sendbuilds debug <build-id> [--config sendbuild.toml]
+sendbuilds replay <build-id> [--config sendbuild.toml]
+sendbuilds artifacts list [--all] [--limit <n>] [--config sendbuild.toml]
+sendbuilds artifacts prune [--keep-last <n>] [--max-age <days>] [--config sendbuild.toml]
+sendbuilds artifacts download <artifact> [--out <path>] [--config sendbuild.toml]
 sendbuilds init [--template <framework>] [--yes]
 sendbuilds cache save|restore|clear|status [--config sendbuild.toml]
 sendbuilds clean [--all] [--cache-only] [--config sendbuild.toml]
@@ -95,6 +100,12 @@ sendbuilds rebase --git [--repo <git-url>] [--branch <name>] [--base <image>] [-
 Use `--in-place` to build directly in the current workspace instead of a temp copy (useful for Next.js `pnpm start` expecting `.next` in project root).
 If `sendbuild.toml` is missing, `sendbuilds build` automatically falls back to a smart local mode with inferred defaults and in-place build.
 For zero-config enterprise mode, use `sendbuilds build --git <repo> --docker`: it auto-generates runtime config, enables security-first checks, auto-generates a local signing key if missing, signs artifacts, emits SBOM/supply-chain metadata, and builds container images even when no Dockerfile exists.
+Default storage paths are OS-aware under a `sendbuilds` data root:
+- Windows: `%LOCALAPPDATA%/sendbuilds`
+- macOS: `~/Library/Application Support/sendbuilds`
+- Linux: `$XDG_DATA_HOME/sendbuilds` (or `~/.local/share/sendbuilds`)
+Artifacts default to `<data-root>/artifacts` and cache defaults to `<data-root>/cache`.
+Within those defaults, sendbuilds auto-namespaces by a stable project storage key (`project-name + repo/path fingerprint`) so duplicate repo names do not collide.
 Accepted repo formats include:
 - `owner/repo` (for example `notsliver/sendara-landing`)
 - `https://github.com/owner/repo`
@@ -123,10 +134,36 @@ Flags:
 - `--dry-run`: print planned steps without executing
 - `--branch`: deploy a specific branch
 - `--local`: deploy current workspace (no git clone required)
+- `--build`: force rebuild before deploy (skip artifact reuse/start)
 - `--remote`: reserved for cloud workers; currently falls back to local execution
 
 Local deploy does not require Docker unless you request `--docker` or `--target container_image`.
 When no explicit Docker/target flags are set, `deploy` auto-detects container need (for example from `sendbuild.toml` targets or local Dockerfile presence) and otherwise runs local non-container flow.
+In local non-container mode, `deploy` now reuses the latest existing `directory` artifact and starts it automatically when possible; if start detection fails, it exits with guidance instead of rebuilding silently.
+When container mode is active (`--docker` or container target), deploy also starts the built image as a local Docker container and prints published port mappings.
+
+## Artifact Management
+
+Inspect and manage build history:
+
+```bash
+sendbuilds artifacts list
+sendbuilds artifacts list --all
+sendbuilds artifacts prune --keep-last 20 --max-age 30
+sendbuilds artifacts download 20260306_210619/artifact.tar.gz --out ./downloads
+```
+
+Debug a specific build-id:
+
+```bash
+sendbuilds debug 20260306_210619
+```
+
+Replay deploy from a build-id (starts container artifact if present, otherwise starts directory artifact):
+
+```bash
+sendbuilds replay 20260306_210619
+```
 
 ## Rebase Base Images
 

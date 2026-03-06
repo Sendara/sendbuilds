@@ -5,9 +5,11 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 use crate::core::config::{
+    default_artifact_dir, default_cache_dir, effective_artifact_dir, project_storage_key,
     CacheConfig, DeployConfig, OutputConfig, ProjectConfig, SandboxConfig, ScanConfig,
     SecurityConfig, SigningConfig, SourceConfig,
 };
@@ -46,6 +48,8 @@ enum Cmd {
         #[arg(long)]
         local: bool,
         #[arg(long)]
+        build: bool,
+        #[arg(long)]
         branch: Option<String>,
         #[arg(long)]
         docker: bool,
@@ -57,6 +61,22 @@ enum Cmd {
         dry_run: bool,
         #[arg(long)]
         remote: bool,
+    },
+    Debug {
+        build_id: String,
+        #[arg(short, long, default_value = "sendbuild.toml")]
+        config: String,
+    },
+    Replay {
+        build_id: String,
+        #[arg(short, long, default_value = "sendbuild.toml")]
+        config: String,
+    },
+    Artifacts {
+        #[command(subcommand)]
+        cmd: ArtifactsCmd,
+        #[arg(short, long, default_value = "sendbuild.toml")]
+        config: String,
     },
     Init {
         #[arg(long)]
@@ -120,6 +140,27 @@ enum CacheCmd {
     Status,
 }
 
+#[derive(Subcommand)]
+enum ArtifactsCmd {
+    List {
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    Prune {
+        #[arg(long = "keep-last")]
+        keep_last: Option<usize>,
+        #[arg(long = "max-age")]
+        max_age_days: Option<u64>,
+    },
+    Download {
+        artifact: String,
+        #[arg(long)]
+        out: Option<String>,
+    },
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -160,13 +201,19 @@ pub fn run() -> Result<()> {
         Cmd::Deploy {
             repo,
             local,
+            build,
             branch,
             docker,
             targets,
             image,
             dry_run,
             remote,
-        } => run_deploy(repo, local, branch, docker, targets, image, dry_run, remote),
+        } => run_deploy(
+            repo, local, build, branch, docker, targets, image, dry_run, remote,
+        ),
+        Cmd::Debug { build_id, config } => run_debug(&build_id, &config),
+        Cmd::Replay { build_id, config } => run_replay(&build_id, &config),
+        Cmd::Artifacts { cmd, config } => run_artifacts(cmd, &config),
         Cmd::Init { template, yes } => init_project(template.as_deref(), yes),
         Cmd::Cache { cmd, config } => run_cache(cmd, &config),
         Cmd::Clean {
@@ -201,6 +248,7 @@ pub fn run() -> Result<()> {
 fn run_deploy(
     repo: Option<String>,
     local: bool,
+    force_build: bool,
     branch: Option<String>,
     docker: bool,
     targets: Vec<String>,
@@ -261,6 +309,14 @@ fn run_deploy(
                 "disabled"
             }
         );
+        println!(
+            "reuse existing local artifact: {}",
+            if !force_build {
+                "yes"
+            } else {
+                "no (forced rebuild)"
+            }
+        );
         println!("planned steps:");
         for step in [
             "clone repo",
@@ -282,20 +338,656 @@ fn run_deploy(
         println!("--remote requested; cloud workers are not configured yet, running locally.");
     }
 
+    // Local deploy should behave like deploy/start by default:
+    // if there is already a built artifact and no container workflow is needed,
+    // reuse it and launch instead of rebuilding.
+    let local_non_container = git_repo.is_none() && !should_use_container;
+    if local_non_container && !force_build {
+        let artifact_root = deploy_artifact_root_from_local_config();
+        if let Some(latest) = latest_directory_artifact(&artifact_root)? {
+            println!(
+                "Reusing existing artifact and starting app from {}",
+                normalize_display_path(&latest)
+            );
+            if start_local_artifact(&latest)? {
+                return Ok(());
+            }
+            println!("Could not auto-start existing artifact.");
+        }
+        let cwd = env::current_dir()?;
+        println!(
+            "Trying to start current workspace directly from {}",
+            normalize_display_path(&cwd)
+        );
+        if start_local_artifact(&cwd)? {
+            return Ok(());
+        }
+        bail!(
+            "deploy start failed: no runnable local artifact/workspace command detected. run `sendbuilds deploy --build` to force rebuild"
+        );
+    }
+
     let image_tag = image.unwrap_or_else(|| format!("{project_name}:latest"));
     let in_place = git_repo.is_none();
     run_quick_build_with_options(
         git_repo,
         branch,
         should_use_container,
-        Some(image_tag),
+        Some(image_tag.clone()),
         in_place,
         None,
         None,
         Some(false),
         Some(normalized_targets),
         false,
+    )?;
+
+    if should_use_container {
+        start_deployed_container(&image_tag, &project_name)?;
+    }
+    Ok(())
+}
+
+fn run_debug(build_id: &str, config_path: &str) -> Result<()> {
+    let artifact_base = resolve_artifact_base(config_path)?;
+    let root = resolve_build_root(&artifact_base, build_id)?;
+    let metrics_path = root.join("build-metrics.json");
+    let lifecycle_path = root.join("cnb").join("lifecycle-metadata.json");
+
+    println!("Build Debug");
+    println!("-----------");
+    println!("build_id      : {}", build_id);
+    println!("artifact_root : {}", normalize_display_path(&root));
+
+    if metrics_path.exists() {
+        let raw = fs::read_to_string(&metrics_path)?;
+        let json: Value = serde_json::from_str(&raw)?;
+        let finished_at = json
+            .get("finished_at")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let cache = json.get("cache").cloned().unwrap_or(Value::Null);
+        let steps = json
+            .get("steps")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let failed = steps
+            .iter()
+            .filter(|s| s.get("status").and_then(Value::as_str) == Some("failed"))
+            .count();
+        println!("finished_at   : {}", finished_at);
+        println!("steps         : {} total, {} failed", steps.len(), failed);
+        if !cache.is_null() {
+            println!("cache         : {}", cache);
+        }
+        println!("top steps:");
+        for step in steps.iter().take(10) {
+            let name = step
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let status = step
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let dur = step.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
+            println!("  - {} [{}] {}ms", name, status, dur);
+        }
+    } else {
+        println!("build-metrics : missing");
+    }
+
+    if lifecycle_path.exists() {
+        let raw = fs::read_to_string(&lifecycle_path)?;
+        let json: Value = serde_json::from_str(&raw)?;
+        let artifacts = json
+            .get("exported_artifacts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        println!("exported artifacts:");
+        for item in artifacts.iter().take(20) {
+            if let Some(p) = item.as_str() {
+                println!("  - {}", p);
+            }
+        }
+    } else {
+        println!("cnb metadata  : missing");
+    }
+    Ok(())
+}
+
+fn run_replay(build_id: &str, config_path: &str) -> Result<()> {
+    let artifact_base = resolve_artifact_base(config_path)?;
+    let root = resolve_build_root(&artifact_base, build_id)?;
+    println!(
+        "Replaying deploy from artifact {}",
+        normalize_display_path(&root)
+    );
+
+    let container_notes = glob_container_note_files(&root)?;
+    if let Some((image, _note_path)) = first_container_image_from_notes(&container_notes)? {
+        let project_hint = project_name_from_repo(&image);
+        start_deployed_container(&image, &project_hint)?;
+        return Ok(());
+    }
+
+    let dir_artifact = root.join("directory");
+    if dir_artifact.exists() {
+        if start_local_artifact(&dir_artifact)? {
+            return Ok(());
+        }
+        bail!("replay failed: found directory artifact but no runnable start command");
+    }
+    bail!(
+        "replay failed: no runnable artifact found for build-id `{}`",
+        build_id
     )
+}
+
+fn run_artifacts(cmd: ArtifactsCmd, config_path: &str) -> Result<()> {
+    let artifact_base = resolve_artifact_base(config_path)?;
+    fs::create_dir_all(&artifact_base)?;
+
+    match cmd {
+        ArtifactsCmd::List { all, limit } => {
+            let builds = list_build_dirs(&artifact_base)?;
+            println!("Artifacts under {}", normalize_display_path(&artifact_base));
+            let list: Vec<PathBuf> = if all {
+                builds
+            } else {
+                builds.into_iter().take(limit).collect()
+            };
+            for path in &list {
+                let id = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                let m = path
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let age_days = SystemTime::now()
+                    .duration_since(m)
+                    .ok()
+                    .map(|d| d.as_secs() / 86_400)
+                    .unwrap_or(0);
+                let project_name = detect_project_name_for_build(&artifact_base, path)
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("- {} (project={}, age={}d)", id, project_name, age_days);
+            }
+            if list.is_empty() {
+                println!("(no artifacts found)");
+            }
+        }
+        ArtifactsCmd::Prune {
+            keep_last,
+            max_age_days,
+        } => {
+            let mut builds = list_build_dirs(&artifact_base)?;
+            let keep = keep_last.unwrap_or(20);
+            let max_age = max_age_days.unwrap_or(30);
+            let now = SystemTime::now();
+            let mut removed = 0usize;
+            for (idx, dir) in builds.drain(..).enumerate() {
+                let modified = dir
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let stale = now
+                    .duration_since(modified)
+                    .ok()
+                    .map(|d| d > Duration::from_secs(max_age * 86_400))
+                    .unwrap_or(false);
+                if idx >= keep || stale {
+                    fs::remove_dir_all(&dir)?;
+                    removed += 1;
+                }
+            }
+            println!(
+                "Pruned {} artifact build(s) from {}",
+                removed,
+                normalize_display_path(&artifact_base)
+            );
+        }
+        ArtifactsCmd::Download { artifact, out } => {
+            let src = resolve_artifact_reference(&artifact_base, &artifact)?;
+            let out_path = out.map(PathBuf::from).unwrap_or_else(|| {
+                env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(
+                        src.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("artifact"),
+                    )
+            });
+            if src.is_file() {
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&src, &out_path)?;
+            } else if src.is_dir() {
+                copy_dir_recursive(&src, &out_path)?;
+            } else {
+                bail!("artifact not found: {}", normalize_display_path(&src));
+            }
+            println!(
+                "Downloaded artifact to {}",
+                normalize_display_path(&out_path)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolve_artifact_base(config_path: &str) -> Result<PathBuf> {
+    if BuildConfig::exists(config_path) {
+        let cfg = BuildConfig::from_file(config_path)?;
+        return Ok(effective_artifact_dir(&cfg));
+    }
+    Ok(default_artifact_dir())
+}
+
+fn resolve_build_root(artifact_base: &Path, build_id: &str) -> Result<PathBuf> {
+    let direct = artifact_base.join(build_id);
+    if direct.exists() {
+        return Ok(direct);
+    }
+    let candidates = list_build_dirs(artifact_base)?;
+    if let Some(found) = candidates.into_iter().find(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == build_id)
+            .unwrap_or(false)
+    }) {
+        return Ok(found);
+    }
+    bail!(
+        "build-id `{}` not found under {}",
+        build_id,
+        normalize_display_path(artifact_base)
+    )
+}
+
+fn list_build_dirs(artifact_base: &Path) -> Result<Vec<PathBuf>> {
+    if !artifact_base.exists() {
+        return Ok(Vec::new());
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(artifact_base)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if is_build_id_dir_name(&name) {
+                dirs.push(entry.path());
+            } else {
+                for sub in fs::read_dir(entry.path())? {
+                    let sub = sub?;
+                    if !sub.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let sub_name = sub.file_name();
+                    let sub_name = sub_name.to_string_lossy();
+                    if is_build_id_dir_name(&sub_name) {
+                        dirs.push(sub.path());
+                    }
+                }
+            }
+        }
+    }
+    dirs.sort_by(|a, b| {
+        let am = a
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let bm = b
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        bm.cmp(&am)
+    });
+    Ok(dirs)
+}
+
+fn is_build_id_dir_name(name: &str) -> bool {
+    // expected: YYYYMMDD_HHMMSS
+    if name.len() != 15 {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    for (idx, b) in bytes.iter().enumerate() {
+        if idx == 8 {
+            if *b != b'_' {
+                return false;
+            }
+        } else if !b.is_ascii_digit() {
+            return false;
+        }
+    }
+    true
+}
+
+fn detect_project_name_for_build(artifact_base: &Path, build_dir: &Path) -> Option<String> {
+    let metrics_path = build_dir.join("build-metrics.json");
+    if metrics_path.exists() {
+        if let Ok(raw) = fs::read_to_string(&metrics_path) {
+            if let Ok(json) = serde_json::from_str::<Value>(&raw) {
+                if let Some(name) = json.get("project").and_then(Value::as_str) {
+                    if !name.trim().is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let parent = build_dir.parent()?;
+    if parent != artifact_base {
+        if let Some(storage_key) = parent.file_name().and_then(|n| n.to_str()) {
+            return Some(project_name_from_storage_key(storage_key));
+        }
+    }
+    None
+}
+
+fn project_name_from_storage_key(storage_key: &str) -> String {
+    let bytes = storage_key.as_bytes();
+    if bytes.len() > 9 && bytes[bytes.len() - 9] == b'-' {
+        let suffix = &storage_key[bytes.len() - 8..];
+        if suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return storage_key[..bytes.len() - 9].to_string();
+        }
+    }
+    storage_key.to_string()
+}
+
+fn resolve_artifact_reference(artifact_base: &Path, artifact: &str) -> Result<PathBuf> {
+    let raw = PathBuf::from(artifact);
+    if raw.is_absolute() && raw.exists() {
+        return Ok(raw);
+    }
+    let combined = artifact_base.join(artifact);
+    if combined.exists() {
+        return Ok(combined);
+    }
+    let by_build = artifact_base.join(artifact);
+    if by_build.exists() {
+        return Ok(by_build);
+    }
+    bail!(
+        "artifact `{}` not found under {}",
+        artifact,
+        normalize_display_path(artifact_base)
+    )
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if entry.file_type()?.is_file() {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn glob_container_note_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("container-image-") && name.ends_with(".txt") {
+            out.push(entry.path());
+        }
+    }
+    Ok(out)
+}
+
+fn first_container_image_from_notes(notes: &[PathBuf]) -> Result<Option<(String, PathBuf)>> {
+    for note in notes {
+        let raw = fs::read_to_string(note)?;
+        for line in raw.lines() {
+            if let Some(image) = line.strip_prefix("image=") {
+                let value = image.trim().to_string();
+                if !value.is_empty() {
+                    return Ok(Some((value, note.clone())));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn deploy_artifact_root_from_local_config() -> PathBuf {
+    BuildConfig::from_file("sendbuild.toml")
+        .map(|c| effective_artifact_dir(&c))
+        .or_else(|_| BuildConfig::for_local_workspace().map(|c| effective_artifact_dir(&c)))
+        .unwrap_or_else(|_| default_artifact_dir())
+}
+
+fn latest_directory_artifact(artifact_root: &Path) -> Result<Option<PathBuf>> {
+    if !artifact_root.exists() {
+        return Ok(None);
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(artifact_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let ts_dir = entry.path();
+        let out = ts_dir.join("directory");
+        if out.exists() {
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            candidates.push((out, modified));
+        }
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(candidates.into_iter().map(|(p, _)| p).next())
+}
+
+fn start_local_artifact(dir: &Path) -> Result<bool> {
+    if !dir.exists() {
+        return Ok(false);
+    }
+    // Built server entrypoints first (Next/Nuxt/custom)
+    if dir
+        .join(".next")
+        .join("standalone")
+        .join("server.js")
+        .exists()
+        && command_exists("node")
+    {
+        println!("Starting Next.js standalone server ...");
+        let status = Command::new("node")
+            .arg(".next/standalone/server.js")
+            .current_dir(dir)
+            .status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    if dir
+        .join(".output")
+        .join("server")
+        .join("index.mjs")
+        .exists()
+        && command_exists("node")
+    {
+        println!("Starting `.output/server/index.mjs` ...");
+        let status = Command::new("node")
+            .arg(".output/server/index.mjs")
+            .current_dir(dir)
+            .status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    if dir.join("server.js").exists() && command_exists("node") {
+        println!("Starting `server.js` ...");
+        let status = Command::new("node")
+            .arg("server.js")
+            .current_dir(dir)
+            .status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+
+    // Node runtime apps
+    if dir.join("package.json").exists() {
+        let commands: Vec<(&str, Vec<&str>)> = if dir.join("pnpm-lock.yaml").exists() {
+            vec![
+                ("pnpm", vec!["run", "start"]),
+                ("npm", vec!["run", "start"]),
+            ]
+        } else if dir.join("yarn.lock").exists() {
+            vec![("yarn", vec!["start"]), ("npm", vec!["run", "start"])]
+        } else {
+            vec![("npm", vec!["run", "start"])]
+        };
+        for (bin, args) in commands {
+            if command_exists(bin) {
+                println!(
+                    "Starting local artifact with `{}` ...",
+                    format!("{bin} {}", args.join(" "))
+                );
+                let status = Command::new(bin).args(args).current_dir(dir).status();
+                if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    // Python web apps
+    if dir.join("manage.py").exists() && (command_exists("python") || command_exists("python3")) {
+        let py = if command_exists("python") {
+            "python"
+        } else {
+            "python3"
+        };
+        println!("Starting local artifact with `{py} manage.py runserver 0.0.0.0:8000` ...");
+        let status = Command::new(py)
+            .args(["manage.py", "runserver", "0.0.0.0:8000"])
+            .current_dir(dir)
+            .status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    if dir.join("app.py").exists() && (command_exists("python") || command_exists("python3")) {
+        let py = if command_exists("python") {
+            "python"
+        } else {
+            "python3"
+        };
+        println!("Starting local artifact with `{py} app.py` ...");
+        let status = Command::new(py).arg("app.py").current_dir(dir).status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+
+    // Static site fallback
+    if dir.join("index.html").exists() && (command_exists("python") || command_exists("python3")) {
+        let py = if command_exists("python") {
+            "python"
+        } else {
+            "python3"
+        };
+        println!("Starting static artifact server on http://127.0.0.1:4173 ...");
+        let status = Command::new(py)
+            .args(["-m", "http.server", "4173"])
+            .current_dir(dir)
+            .status();
+        if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn command_exists(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn start_deployed_container(image: &str, project_name: &str) -> Result<()> {
+    if !command_exists("docker") {
+        bail!("docker is required to start deployed container, but it was not found");
+    }
+
+    let container_name = format!("{project_name}-deploy");
+    let _ = Command::new("docker")
+        .args(["rm", "-f", &container_name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    println!(
+        "Starting deployed container `{}` from image `{}` ...",
+        container_name, image
+    );
+    let run = Command::new("docker")
+        .args(["run", "-d", "--name", &container_name, "-P", image])
+        .output()?;
+    if !run.status.success() {
+        bail!(
+            "failed to start container `{}` from image `{}`",
+            container_name,
+            image
+        );
+    }
+
+    let container_id = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    let ports = Command::new("docker")
+        .args(["port", &container_name])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "no published ports reported".to_string());
+
+    println!("Container started.");
+    println!("container_name={}", container_name);
+    println!("container_id={}", container_id);
+    println!("image={}", image);
+    println!("ports={}", ports.replace('\n', ", "));
+    let running = Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", &container_name])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("running={}", running);
+    Ok(())
 }
 
 fn infer_deploy_container_need(git_repo: Option<&str>) -> Result<bool> {
@@ -384,7 +1076,7 @@ fn run_quick_build_with_options(
         }),
         build: None,
         deploy: DeployConfig {
-            artifact_dir: "./artifacts".to_string(),
+            artifact_dir: normalize_display_path(&default_artifact_dir()),
             targets: Some(targets),
             container_image: if wants_container {
                 Some(image_tag)
@@ -615,6 +1307,7 @@ fn init_project(template: Option<&str>, _yes: bool) -> Result<()> {
         .unwrap_or("my-app")
         .to_string();
     let repo_default = "https://github.com/you/repo".to_string();
+    let artifact_dir_default = normalize_display_path(&default_artifact_dir());
 
     let framework = template
         .map(|v| v.to_string())
@@ -634,7 +1327,7 @@ branch = "main"
 output_dir = ".next"
 
 [deploy]
-artifact_dir = "./artifacts"
+artifact_dir = "{artifact_dir_default}"
 targets = ["static_site", "tarball", "kubernetes"]
 container_image = "{project_name}:latest"
 
@@ -661,7 +1354,7 @@ repo = "{repo_default}"
 branch = "main"
 
 [deploy]
-artifact_dir = "./artifacts"
+artifact_dir = "{artifact_dir_default}"
 targets = ["tarball", "container_image", "kubernetes"]
 container_image = "{project_name}:latest"
 
@@ -691,7 +1384,7 @@ branch = "main"
 output_dir = "staticfiles"
 
 [deploy]
-artifact_dir = "./artifacts"
+artifact_dir = "{artifact_dir_default}"
 targets = ["static_site", "serverless_function", "kubernetes"]
 container_image = "{project_name}:latest"
 
@@ -718,7 +1411,7 @@ repo = "{repo_default}"
 branch = "main"
 
 [deploy]
-artifact_dir = "./artifacts"
+artifact_dir = "{artifact_dir_default}"
 targets = ["directory", "kubernetes"]
 container_image = "{project_name}:latest"
 
@@ -745,7 +1438,7 @@ max_age_days = 14
 fn run_cache(cmd: CacheCmd, config_path: &str) -> Result<()> {
     let cfg = BuildConfig::from_file(config_path)?;
     let cache_root = resolve_cache_root(&cfg);
-    let project_cache = cache_root.join(&cfg.project.name);
+    let project_cache = cache_root.join(project_storage_key(&cfg));
     let deps = project_cache.join("deps");
     let artifact = project_cache.join("artifact");
 
@@ -797,9 +1490,9 @@ fn run_cache(cmd: CacheCmd, config_path: &str) -> Result<()> {
 
 fn clean(config_path: &str, all: bool, cache_only: bool) -> Result<()> {
     let cfg = BuildConfig::from_file(config_path)?;
-    let artifact_dir = PathBuf::from(&cfg.deploy.artifact_dir);
+    let artifact_dir = effective_artifact_dir(&cfg);
     let cache_root = resolve_cache_root(&cfg);
-    let project_cache = cache_root.join(&cfg.project.name);
+    let project_cache = cache_root.join(project_storage_key(&cfg));
 
     if cache_only {
         if project_cache.exists() {
@@ -832,6 +1525,15 @@ fn clean(config_path: &str, all: bool, cache_only: bool) -> Result<()> {
 fn info(config_path: &str, show_env: bool, show_deps: bool) -> Result<()> {
     let cfg = BuildConfig::from_file(config_path).ok();
     println!("sendbuilds version {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "executable: {}",
+        normalize_display_path(&env::current_exe().unwrap_or_else(|_| PathBuf::from("unknown")))
+    );
+    println!(
+        "build_identity: {}@{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
 
     if let Some(c) = &cfg {
         println!("project: {}", c.project.name);
@@ -839,7 +1541,11 @@ fn info(config_path: &str, show_env: bool, show_deps: bool) -> Result<()> {
             Some(s) => println!("repo: {}", s.repo),
             None => println!("source: local workspace"),
         }
-        println!("artifact_dir: {}", c.deploy.artifact_dir);
+        println!(
+            "artifact_dir: {}",
+            normalize_display_path(&effective_artifact_dir(c))
+        );
+        println!("storage_key: {}", project_storage_key(c));
     }
 
     if show_env {
@@ -1122,11 +1828,15 @@ fn resolve_cache_root(cfg: &BuildConfig) -> PathBuf {
         .as_ref()
         .and_then(|c| c.dir.as_ref())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(&cfg.deploy.artifact_dir).join(".sendbuild-cache"))
+        .unwrap_or_else(default_cache_dir)
 }
 
 fn file_contains(path: &Path, needle: &str) -> bool {
     fs::read_to_string(path)
         .map(|v| v.to_lowercase().contains(&needle.to_lowercase()))
         .unwrap_or(false)
+}
+
+fn normalize_display_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
 }

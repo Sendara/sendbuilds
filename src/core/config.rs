@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct BuildConfig {
@@ -153,7 +155,7 @@ impl BuildConfig {
             source: None,
             build: None,
             deploy: DeployConfig {
-                artifact_dir: "./artifacts".to_string(),
+                artifact_dir: default_artifact_dir().display().to_string(),
                 targets: Some(vec!["directory".to_string()]),
                 container_image: None,
                 container_platforms: None,
@@ -177,4 +179,103 @@ impl BuildConfig {
     pub fn exists(path: &str) -> bool {
         Path::new(path).exists()
     }
+}
+
+pub fn default_data_root() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        return env::var_os("LOCALAPPDATA")
+            .or_else(|| env::var_os("APPDATA"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("sendbuilds");
+    }
+    if cfg!(target_os = "macos") {
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        return home
+            .join("Library")
+            .join("Application Support")
+            .join("sendbuilds");
+    }
+    let xdg_data = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".local").join("share"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    xdg_data.join("sendbuilds")
+}
+
+pub fn default_artifact_dir() -> PathBuf {
+    default_data_root().join("artifacts")
+}
+
+pub fn default_cache_dir() -> PathBuf {
+    default_data_root().join("cache")
+}
+
+pub fn project_storage_key(cfg: &BuildConfig) -> String {
+    let base_name = sanitize_segment(&cfg.project.name);
+    let identity = if let Some(source) = cfg.source.as_ref() {
+        format!("repo:{}", source.repo)
+    } else {
+        let cwd = env::current_dir()
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        format!("path:{}", cwd.display())
+    };
+    let hash = short_hash(&identity);
+    format!("{base_name}-{hash}")
+}
+
+pub fn effective_artifact_dir(cfg: &BuildConfig) -> PathBuf {
+    let configured = PathBuf::from(&cfg.deploy.artifact_dir);
+    if paths_equivalent(&configured, &default_artifact_dir()) {
+        return default_artifact_dir().join(project_storage_key(cfg));
+    }
+    configured
+}
+
+fn sanitize_segment(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' || ch == '.' {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "project".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn short_hash(input: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    input.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
+}
+
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    let sa = normalize_path_for_compare(a);
+    let sb = normalize_path_for_compare(b);
+    if cfg!(target_os = "windows") {
+        sa.eq_ignore_ascii_case(&sb)
+    } else {
+        sa == sb
+    }
+}
+
+fn normalize_path_for_compare(p: &Path) -> String {
+    p.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
 }
