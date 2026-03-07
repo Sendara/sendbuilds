@@ -292,6 +292,8 @@ fn run_deploy(
         .as_deref()
         .map(project_name_from_repo)
         .unwrap_or_else(local_project_name);
+    let docker_available = command_exists("docker");
+    let kubectl_available = command_exists("kubectl");
 
     let explicit_targets = !targets.is_empty();
     let mut normalized_targets = if targets.is_empty() {
@@ -306,8 +308,21 @@ fn run_deploy(
         .iter()
         .any(|t| t == "container_image" || t == "kubernetes");
     let inferred_container = infer_deploy_container_need(git_repo.as_deref())?;
-    let should_use_container =
-        docker || target_requires_container || (!docker && !explicit_targets && inferred_container);
+    let auto_container_for_deploy = !docker
+        && !explicit_targets
+        && (inferred_container || git_repo.is_some() || kubectl_available);
+    let mut should_use_container = docker || target_requires_container || auto_container_for_deploy;
+
+    if should_use_container && !docker_available {
+        println!("Docker not detected. Falling back to local deploy runtime.");
+        normalized_targets.retain(|t| t != "container_image");
+        should_use_container = false;
+    }
+
+    if normalized_targets.iter().any(|t| t == "kubernetes") && !kubectl_available {
+        println!("kubectl not detected. Skipping kubernetes target.");
+        normalized_targets.retain(|t| t != "kubernetes");
+    }
 
     if should_use_container && !normalized_targets.iter().any(|t| t == "container_image") {
         normalized_targets.push("container_image".to_string());
@@ -331,6 +346,19 @@ fn run_deploy(
                 "enabled"
             } else {
                 "disabled"
+            }
+        );
+        println!(
+            "runtime detection: docker={}, kubectl={}",
+            if docker_available {
+                "available"
+            } else {
+                "missing"
+            },
+            if kubectl_available {
+                "available"
+            } else {
+                "missing"
             }
         );
         println!(
@@ -394,8 +422,8 @@ fn run_deploy(
     let image_tag = image.unwrap_or_else(|| format!("{project_name}:latest"));
     let in_place = git_repo.is_none();
     run_quick_build_with_options(
-        git_repo,
-        branch,
+        git_repo.clone(),
+        branch.clone(),
         should_use_container,
         Some(image_tag.clone()),
         in_place,
@@ -408,6 +436,18 @@ fn run_deploy(
 
     if should_use_container {
         start_deployed_container(&image_tag, &project_name)?;
+    } else {
+        let artifact_root =
+            deploy_artifact_root_for_source(git_repo.as_deref(), branch.as_deref())?;
+        if let Some(latest) = latest_directory_artifact(&artifact_root)? {
+            if start_local_artifact(&latest)? {
+                return Ok(());
+            }
+        }
+        println!(
+            "Deploy completed with local artifacts at {}",
+            normalize_display_path(&artifact_root)
+        );
     }
     Ok(())
 }
@@ -488,7 +528,12 @@ fn run_replay(
     time_machine: Option<String>,
     config_path: &str,
 ) -> Result<()> {
-    let selected = select_build_id(build_id_positional, build_id_flag, time_machine, config_path)?;
+    let selected = select_build_id(
+        build_id_positional,
+        build_id_flag,
+        time_machine,
+        config_path,
+    )?;
     run_replay_selected(&selected, config_path)
 }
 
@@ -537,7 +582,11 @@ fn select_build_id(
     let by_id = match (positional, flag) {
         (Some(a), Some(b)) => {
             if a != b {
-                bail!("conflicting build-id values: positional `{}` vs --buildid `{}`", a, b);
+                bail!(
+                    "conflicting build-id values: positional `{}` vs --buildid `{}`",
+                    a,
+                    b
+                );
             }
             Some(a)
         }
@@ -559,7 +608,9 @@ fn select_build_id(
     let tm = time_machine
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing build target: provide <build-id> or --time-machine/--to"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing build target: provide <build-id> or --time-machine/--to")
+        })?;
     select_build_id_for_time_machine(config_path, &tm)
 }
 
@@ -592,7 +643,10 @@ fn select_build_id_for_time_machine(config_path: &str, time_machine: &str) -> Re
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow::anyhow!("failed to read selected build id"))?;
-        println!("Time-machine selected build `{}` for `{}`", id, time_machine);
+        println!(
+            "Time-machine selected build `{}` for `{}`",
+            id, time_machine
+        );
         return Ok(id.to_string());
     }
     bail!(
@@ -948,6 +1002,50 @@ fn deploy_artifact_root_from_local_config() -> PathBuf {
         .map(|c| effective_artifact_dir(&c))
         .or_else(|_| BuildConfig::for_local_workspace().map(|c| effective_artifact_dir(&c)))
         .unwrap_or_else(|_| default_artifact_dir())
+}
+
+fn deploy_artifact_root_for_source(
+    git_repo: Option<&str>,
+    git_branch: Option<&str>,
+) -> Result<PathBuf> {
+    if git_repo.is_none() {
+        return Ok(deploy_artifact_root_from_local_config());
+    }
+    let name = git_repo
+        .map(project_name_from_repo)
+        .unwrap_or_else(local_project_name);
+    let cfg = BuildConfig {
+        project: ProjectConfig {
+            name,
+            language: None,
+        },
+        source: git_repo.map(|repo| SourceConfig {
+            repo: repo.to_string(),
+            branch: git_branch.map(|b| b.to_string()),
+            commit: None,
+        }),
+        build: None,
+        deploy: DeployConfig {
+            artifact_dir: normalize_display_path(&default_artifact_dir()),
+            targets: Some(vec!["directory".to_string()]),
+            container_image: None,
+            container_platforms: None,
+            push_container: Some(false),
+            rebase_base: None,
+            kubernetes: None,
+            gc: None,
+        },
+        output: None,
+        cache: None,
+        scan: None,
+        security: None,
+        env: None,
+        env_from_host: None,
+        sandbox: None,
+        signing: None,
+        compatibility: None,
+    };
+    Ok(effective_artifact_dir(&cfg))
 }
 
 fn latest_directory_artifact(artifact_root: &Path) -> Result<Option<PathBuf>> {

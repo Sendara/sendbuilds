@@ -2,6 +2,7 @@
 /artifacts/
 /.sendbuild-cache/
 /.sendbuild/
+Cargo.lock
 
 # Rust/Cargo
 **/*.rs.bk
