@@ -444,10 +444,19 @@ fn run_deploy(
         Some(false),
         Some(normalized_targets),
         false,
-    )?;
+    )
+    .with_context(|| {
+        format!(
+            "deploy build failed (repo={}, branch={}, container_mode={})",
+            git_repo.as_deref().unwrap_or("local-workspace"),
+            branch.as_deref().unwrap_or("default"),
+            should_use_container
+        )
+    })?;
 
     if should_use_container {
-        start_deployed_container(&image_tag, &project_name)?;
+        start_deployed_container(&image_tag, &project_name)
+            .with_context(|| format!("deploy runtime start failed for image `{image_tag}`"))?;
     } else {
         let artifact_root =
             deploy_artifact_root_for_source(git_repo.as_deref(), branch.as_deref())?;
@@ -1591,6 +1600,7 @@ fn start_deployed_container(image: &str, project_name: &str) -> Result<()> {
     if !command_exists("docker") {
         bail!("docker is required to start deployed container, but it was not found");
     }
+    ensure_docker_daemon_ready()?;
 
     let container_name = format!("{project_name}-deploy");
     let _ = Command::new("docker")
@@ -1598,6 +1608,15 @@ fn start_deployed_container(image: &str, project_name: &str) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    if !docker_image_exists(image)? {
+        bail!(
+            "image `{}` is not present locally. the container build may have been skipped or failed earlier. \
+run `sendbuilds build --docker --image {}` and retry deploy",
+            image,
+            image
+        );
+    }
 
     println!(
         "Starting deployed container `{}` from image `{}` ...",
@@ -1607,10 +1626,21 @@ fn start_deployed_container(image: &str, project_name: &str) -> Result<()> {
         .args(["run", "-d", "--name", &container_name, "-P", image])
         .output()?;
     if !run.status.success() {
+        let stderr = render_output_stream(&run.stderr);
+        let stdout = render_output_stream(&run.stdout);
+        let state =
+            docker_container_state(&container_name).unwrap_or_else(|| "unavailable".to_string());
+        let logs =
+            docker_container_logs(&container_name).unwrap_or_else(|| "unavailable".to_string());
         bail!(
-            "failed to start container `{}` from image `{}`",
+            "failed to start container `{}` from image `{}`. docker_run_exit={:?}; docker_run_stderr={}; docker_run_stdout={}; container_state={}; container_logs={}; hints: verify Dockerfile CMD/ENTRYPOINT, required env vars, and exposed ports",
             container_name,
-            image
+            image,
+            run.status.code(),
+            stderr,
+            stdout,
+            state,
+            logs
         );
     }
 
@@ -1636,6 +1666,86 @@ fn start_deployed_container(image: &str, project_name: &str) -> Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
     println!("running={}", running);
     Ok(())
+}
+
+fn ensure_docker_daemon_ready() -> Result<()> {
+    let out = Command::new("docker").arg("info").output();
+    match out {
+        Ok(res) if res.status.success() => Ok(()),
+        Ok(res) => bail!(
+            "docker daemon is not ready (docker info exit={:?}). stderr={} stdout={}. \
+hints: start Docker Desktop (or dockerd) and retry",
+            res.status.code(),
+            render_output_stream(&res.stderr),
+            render_output_stream(&res.stdout)
+        ),
+        Err(err) => bail!("failed to run `docker info`: {}", err),
+    }
+}
+
+fn docker_image_exists(image: &str) -> Result<bool> {
+    let out = Command::new("docker")
+        .args(["image", "inspect", image])
+        .output()?;
+    Ok(out.status.success())
+}
+
+fn docker_container_state(container_name: &str) -> Option<String> {
+    let out = Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Status}}|{{.State.Error}}|{{.State.ExitCode}}",
+            container_name,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn docker_container_logs(container_name: &str) -> Option<String> {
+    let out = Command::new("docker")
+        .args(["logs", "--tail", "80", container_name])
+        .output()
+        .ok()?;
+    let logs = if out.stdout.is_empty() && out.stderr.is_empty() {
+        String::new()
+    } else if out.stderr.is_empty() {
+        render_output_stream(&out.stdout)
+    } else if out.stdout.is_empty() {
+        render_output_stream(&out.stderr)
+    } else {
+        format!(
+            "{} | {}",
+            render_output_stream(&out.stdout),
+            render_output_stream(&out.stderr)
+        )
+    };
+    if logs.is_empty() {
+        None
+    } else {
+        Some(logs)
+    }
+}
+
+fn render_output_stream(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw).replace('\n', " | ");
+    let trimmed = text.trim().to_string();
+    if trimmed.len() > 600 {
+        let mut clipped = trimmed.chars().take(600).collect::<String>();
+        clipped.push_str(" ...");
+        clipped
+    } else {
+        trimmed
+    }
 }
 
 fn infer_deploy_container_need(git_repo: Option<&str>) -> Result<bool> {
