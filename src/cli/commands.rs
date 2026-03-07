@@ -414,8 +414,8 @@ fn run_deploy(
         if start_local_artifact(&cwd)? {
             return Ok(());
         }
-        bail!(
-            "deploy start failed: no runnable local artifact/workspace command detected. run `sendbuilds deploy --build` to force rebuild"
+        println!(
+            "No reusable local build was started. Building fresh artifacts and deploying locally ..."
         );
     }
 
