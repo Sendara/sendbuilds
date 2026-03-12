@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Deserialize)]
 pub struct BuildConfig {
     pub project: ProjectConfig,
+    pub workspace: Option<WorkspaceConfig>,
+    pub packages: Option<Vec<PackageConfig>>,
     pub source: Option<SourceConfig>,
     pub build: Option<BuildStepConfig>,
     pub deploy: DeployConfig,
@@ -32,6 +34,30 @@ pub struct OutputConfig {
 pub struct ProjectConfig {
     pub name: String,
     pub language: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorkspaceConfig {
+    pub enabled: Option<bool>,
+    pub root: Option<String>,
+    pub mode: Option<String>,
+    pub packages: Option<Vec<String>>,
+    pub build: Option<String>,
+    pub graph_output: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PackageConfig {
+    pub name: String,
+    pub path: String,
+    pub language: Option<String>,
+    pub install_cmd: Option<String>,
+    pub build_cmd: Option<String>,
+    pub output_dir: Option<String>,
+    pub start_cmd: Option<String>,
+    pub depends_on: Option<Vec<String>>,
+    pub targets: Option<Vec<String>>,
+    pub container_image: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +178,8 @@ impl BuildConfig {
                 name,
                 language: None,
             },
+            workspace: None,
+            packages: None,
             source: None,
             build: None,
             deploy: DeployConfig {

@@ -17,6 +17,8 @@ use crate::core::config::{
 };
 use crate::core::BuildConfig;
 use crate::engine::BuildEngine;
+use crate::runtime::artifacts;
+use crate::workspace::engine::{run_workspace_build, run_workspace_deploy, WorkspaceRunOptions};
 
 #[derive(Parser)]
 #[command(name = "sendbuilds", about = "send it. build it.")]
@@ -36,6 +38,14 @@ enum Cmd {
         reproducible: bool,
         #[arg(long)]
         in_place: bool,
+        #[arg(long)]
+        workspace: bool,
+        #[arg(long = "packages", value_delimiter = ',')]
+        packages: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        affected: bool,
         #[arg(long)]
         git: Option<String>,
         #[arg(long)]
@@ -59,6 +69,14 @@ enum Cmd {
         targets: Vec<String>,
         #[arg(long)]
         image: Option<String>,
+        #[arg(long)]
+        workspace: bool,
+        #[arg(long = "packages", value_delimiter = ',')]
+        packages: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        affected: bool,
         #[arg(long = "dry-run")]
         dry_run: bool,
         #[arg(long)]
@@ -190,6 +208,10 @@ pub fn run() -> Result<()> {
             events,
             reproducible,
             in_place,
+            workspace,
+            packages,
+            all,
+            affected,
             git,
             branch,
             docker,
@@ -200,6 +222,26 @@ pub fn run() -> Result<()> {
             }
             if BuildConfig::exists(&config) {
                 let cfg = BuildConfig::from_file(&config)?;
+                let mut build_mode = None;
+                if all {
+                    build_mode = Some("all".to_string());
+                } else if affected {
+                    build_mode = Some("affected".to_string());
+                }
+                let opts = WorkspaceRunOptions {
+                    force: workspace,
+                    packages: if packages.is_empty() {
+                        None
+                    } else {
+                        Some(packages)
+                    },
+                    build_mode,
+                    events,
+                    reproducible,
+                };
+                if run_workspace_build(cfg.clone(), &opts)? {
+                    return Ok(());
+                }
                 prepare_signing_key(cfg.signing.as_ref())?;
                 BuildEngine::from_config(cfg)
                     .with_in_place(in_place)
@@ -227,10 +269,26 @@ pub fn run() -> Result<()> {
             docker,
             targets,
             image,
+            workspace,
+            packages,
+            all,
+            affected,
             dry_run,
             remote,
         } => run_deploy(
-            repo, local, build, branch, docker, targets, image, dry_run, remote,
+            repo,
+            local,
+            build,
+            branch,
+            docker,
+            targets,
+            image,
+            workspace,
+            packages,
+            all,
+            affected,
+            dry_run,
+            remote,
         ),
         Cmd::Debug { build_id, config } => run_debug(&build_id, &config),
         Cmd::Replay {
@@ -289,6 +347,10 @@ fn run_deploy(
     docker: bool,
     targets: Vec<String>,
     image: Option<String>,
+    workspace: bool,
+    packages: Vec<String>,
+    all: bool,
+    affected: bool,
     dry_run: bool,
     remote: bool,
 ) -> Result<()> {
@@ -297,6 +359,37 @@ fn run_deploy(
     }
     if branch.is_some() && (local || repo.is_none()) {
         bail!("--branch requires a git repo deploy target");
+    }
+
+    if workspace && repo.is_some() {
+        bail!("workspace deploy is only supported with --local for now");
+    }
+    if workspace && !local {
+        println!("Workspace deploy requested; forcing --local mode.");
+    }
+
+    if BuildConfig::exists("sendbuild.toml") {
+        let cfg = BuildConfig::from_file("sendbuild.toml")?;
+        let mut build_mode = None;
+        if all {
+            build_mode = Some("all".to_string());
+        } else if affected {
+            build_mode = Some("affected".to_string());
+        }
+        let opts = WorkspaceRunOptions {
+            force: workspace,
+            packages: if packages.is_empty() {
+                None
+            } else {
+                Some(packages.clone())
+            },
+            build_mode,
+            events: None,
+            reproducible: false,
+        };
+        if run_workspace_deploy(cfg, &opts, force_build)? {
+            return Ok(());
+        }
     }
 
     let git_repo = if local { None } else { repo };
@@ -1585,6 +1678,23 @@ fn start_local_artifact(dir: &Path) -> Result<bool> {
             return Ok(true);
         }
     }
+    // Generic fallback: infer a runnable command for non-Node/Python stacks.
+    if let Ok(cmd) = artifacts::infer_local_start_command(dir) {
+        if let Some((bin, args)) = cmd.split_first() {
+            if !looks_like_path(bin) && !command_exists(bin) {
+                println!(
+                    "Skipping inferred start command `{}` (runtime not available).",
+                    bin
+                );
+                return Ok(false);
+            }
+            println!("Starting local artifact with `{}` ...", cmd.join(" "));
+            let status = Command::new(bin).args(args).current_dir(dir).status();
+            if status.as_ref().map(|s| s.success()).unwrap_or(false) {
+                return Ok(true);
+            }
+        }
+    }
     Ok(false)
 }
 
@@ -1594,6 +1704,13 @@ fn command_exists(bin: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn looks_like_path(bin: &str) -> bool {
+    bin.starts_with('.')
+        || bin.contains('\\')
+        || bin.contains('/')
+        || bin.contains(':')
 }
 
 fn start_deployed_container(image: &str, project_name: &str) -> Result<()> {
