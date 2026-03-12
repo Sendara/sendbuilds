@@ -12,6 +12,12 @@ Build automation CLI with step events, caching, auto-detection, metrics, sandbox
 sendbuilds build --config sendbuild.toml
 ```
 
+Unused dependency detection (best-effort, per language):
+
+```bash
+sendbuilds build --unused-deps
+```
+
 ## Workspace / Monorepo
 
 sendbuilds can detect and build workspaces (Node, Rust, Go, Gradle/Maven, .NET, Python).

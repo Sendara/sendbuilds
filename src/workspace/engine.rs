@@ -20,6 +20,7 @@ pub struct WorkspaceRunOptions {
     pub build_mode: Option<String>,
     pub events: Option<bool>,
     pub reproducible: bool,
+    pub unused_deps: bool,
 }
 
 pub fn run_workspace_build(cfg: BuildConfig, opts: &WorkspaceRunOptions) -> Result<bool> {
@@ -65,6 +66,7 @@ pub fn run_workspace_build(cfg: BuildConfig, opts: &WorkspaceRunOptions) -> Resu
             .with_in_place(true)
             .with_events(opts.events)
             .with_reproducible(opts.reproducible)
+            .with_unused_deps(opts.unused_deps)
             .run()?;
     }
 
@@ -114,6 +116,7 @@ pub fn run_workspace_deploy(
             .with_in_place(true)
             .with_events(opts.events)
             .with_reproducible(opts.reproducible)
+            .with_unused_deps(opts.unused_deps)
             .run()?;
     }
 

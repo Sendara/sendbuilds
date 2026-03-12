@@ -25,6 +25,7 @@ pub struct BuildEngine {
     in_place: bool,
     events_override: Option<bool>,
     reproducible: bool,
+    unused_deps: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -58,6 +59,7 @@ impl BuildEngine {
             in_place: false,
             events_override: None,
             reproducible: false,
+            unused_deps: false,
         }
     }
 
@@ -78,6 +80,11 @@ impl BuildEngine {
 
     pub fn with_reproducible(mut self, reproducible: bool) -> Self {
         self.reproducible = reproducible;
+        self
+    }
+
+    pub fn with_unused_deps(mut self, unused: bool) -> Self {
+        self.unused_deps = unused;
         self
     }
 
@@ -154,6 +161,7 @@ impl BuildEngine {
         let mut security_report: Option<security::SecurityReport> = None;
         let mut security_sbom: Option<Value> = None;
         let mut supply_chain_metadata: Option<Value> = None;
+        let unused_deps_enabled = self.unused_deps;
 
         let cache = self.configure_cache(&ctx)?;
         if let Some(c) = &cache {
@@ -279,6 +287,17 @@ impl BuildEngine {
             }
             Ok(())
         })?);
+        if unused_deps_enabled {
+            let lang = resolved_language.clone();
+            steps.push(self.execute_step(&ctx, "unused-deps", |_e, cctx, step| {
+                let out = crate::runtime::unused::run(&lang, &cctx.work_dir, &cctx.env, sandbox_enabled)?;
+                for line in crate::runtime::unused::to_build_logs(&out) {
+                    step.push_log(line.clone());
+                    log::pipe(&line);
+                }
+                Ok(())
+            })?);
+        }
         if security_enabled {
             let lang = resolved_language.clone();
             let security_cfg = cfg.security.clone();

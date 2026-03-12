@@ -39,6 +39,8 @@ enum Cmd {
         #[arg(long)]
         in_place: bool,
         #[arg(long)]
+        unused_deps: bool,
+        #[arg(long)]
         workspace: bool,
         #[arg(long = "packages", value_delimiter = ',')]
         packages: Vec<String>,
@@ -208,6 +210,7 @@ pub fn run() -> Result<()> {
             events,
             reproducible,
             in_place,
+            unused_deps,
             workspace,
             packages,
             all,
@@ -238,6 +241,7 @@ pub fn run() -> Result<()> {
                     build_mode,
                     events,
                     reproducible,
+                    unused_deps,
                 };
                 if run_workspace_build(cfg.clone(), &opts)? {
                     return Ok(());
@@ -247,6 +251,7 @@ pub fn run() -> Result<()> {
                     .with_in_place(in_place)
                     .with_events(events)
                     .with_reproducible(reproducible)
+                    .with_unused_deps(unused_deps)
                     .run()
             } else {
                 println!(
@@ -258,6 +263,7 @@ pub fn run() -> Result<()> {
                     .with_in_place(true)
                     .with_events(events)
                     .with_reproducible(reproducible)
+                    .with_unused_deps(unused_deps)
                     .run()
             }
         }
@@ -386,6 +392,7 @@ fn run_deploy(
             build_mode,
             events: None,
             reproducible: false,
+            unused_deps: false,
         };
         if run_workspace_deploy(cfg, &opts, force_build)? {
             return Ok(());
